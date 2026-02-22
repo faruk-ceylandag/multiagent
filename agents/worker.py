@@ -997,7 +997,7 @@ curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{
     {"description":"FULL DESCRIPTION with ALL context, URLs, acceptance criteria. Agent knows NOTHING else.","assigned_to":"AGENT_NAME","priority":5,"depends_on_step":null,"task_external_id":"JIRA-123 or GH-45 or empty"},
     {"description":"FULL DESCRIPTION...","assigned_to":"AGENT_NAME","priority":5,"depends_on_step":0,"task_external_id":"same external ID"}
   ],
-  "project":"{{current_project}}","branch":"{{current_branch}}"
+  "project":"{{current_project}}"
 }'
 
 RULES:
@@ -1008,6 +1008,7 @@ RULES:
 5. If task mentions a specific agent ("frontend fix X"), single step plan to that agent. Zero analysis.
 6. If task has a URL (Figma/Jira/GitHub) → TRY the matching MCP tool to read it. If MCP fails, include the raw URL + [USE X MCP] prefix in the step description.
 6b. ALWAYS extract external task ID from URLs: Jira→"PA-123", GitHub→"GH-42", Linear→"PRJ-55". Put it in EVERY step's task_external_id field. This is used for branch names and commit messages.
+6c. NO external ID? Leave task_external_id EMPTY — system auto-generates "TASK-{id}" and "feature/TASK-{id}" branch. Do NOT invent branch names.
 7. NEVER write code, edit files, or implement anything. ONLY plan.
 8. NEVER say "I can't" or ask user for help. ALWAYS create a plan. The worst case is a single step with just the URL.
 9. The user will review & approve the plan before tasks are created.

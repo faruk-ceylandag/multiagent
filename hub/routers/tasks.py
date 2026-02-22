@@ -952,6 +952,9 @@ def approve_plan(data: dict):
     created_tasks = []
     # Map step index → task ID for dependency resolution
     step_to_tid = {}
+    # Shared branch for all tasks in this plan (resolved on first task)
+    plan_shared_branch = None
+    plan_shared_ext_id = None
 
     with lock:
         for idx in sorted(selected):
@@ -970,6 +973,21 @@ def approve_plan(data: dict):
                     deps.append(step_to_tid[dep_step])
 
             tid = max(tasks.keys(), default=0) + 1
+            # Branch resolution: step external_id > plan branch > auto-generate
+            # All tasks in a plan share the SAME branch for consistency
+            step_ext_id = step.get("task_external_id", "").strip()
+            if plan_shared_branch is None:
+                # First task determines the shared branch
+                plan_branch = plan.get("branch", "").strip()
+                if step_ext_id:
+                    plan_shared_branch = step_ext_id if step_ext_id.startswith("feature/") else f"feature/{step_ext_id}"
+                    plan_shared_ext_id = step_ext_id
+                elif plan_branch and plan_branch not in ("main", "master", "develop", ""):
+                    plan_shared_branch = plan_branch if plan_branch.startswith("feature/") else f"feature/{plan_branch}"
+                    plan_shared_ext_id = plan_branch.replace("feature/", "")
+                else:
+                    plan_shared_branch = f"feature/TASK-{tid}"
+                    plan_shared_ext_id = f"TASK-{tid}"
             task = {
                 "id": tid,
                 "description": step.get("description", ""),
@@ -977,8 +995,8 @@ def approve_plan(data: dict):
                 "status": "to_do",
                 "depends_on": deps,
                 "project": plan.get("project", ""),
-                "branch": plan.get("branch", ""),
-                "task_external_id": step.get("task_external_id", ""),
+                "branch": plan_shared_branch,
+                "task_external_id": step_ext_id or plan_shared_ext_id,
                 "parent_id": None,
                 "priority": step.get("priority", 5),
                 "created": datetime.now().isoformat(),
