@@ -200,16 +200,32 @@ def submit_change(data: dict):
     from hub.state import change_counter as _cc
     import hub.state as _st
     with lock:
-        _st.change_counter += 1
         agent_name = data.get("agent", "?")
+        project = data.get("project", "")
         branch = ""
         for t in tasks.values():
             if t.get("assigned_to") == agent_name and t.get("status") == "in_progress":
                 branch = t.get("branch", "")
                 break
+        # Deduplicate: update existing pending change for same project+branch instead of creating new
+        existing = None
+        for c in changes:
+            if (c.get("status") == "pending" and c.get("project") == project
+                    and c.get("branch") == branch and branch):
+                existing = c
+                break
+        if existing:
+            existing["agent"] = agent_name
+            existing["description"] = data.get("description", "")
+            existing["diff"] = data.get("diff", "")
+            existing["files"] = data.get("files", [])
+            existing["timestamp"] = datetime.now().isoformat()
+            save_state()
+            return {"status": "ok", "id": existing["id"]}
+        _st.change_counter += 1
         entry = {
             "id": _st.change_counter, "agent": agent_name,
-            "project": data.get("project", ""), "description": data.get("description", ""),
+            "project": project, "description": data.get("description", ""),
             "diff": data.get("diff", ""), "files": data.get("files", []),
             "branch": branch,
             "timestamp": datetime.now().isoformat(), "status": "pending"

@@ -742,7 +742,7 @@ def approve_plan(data: dict):
                 "depends_on": deps,
                 "project": plan.get("project", ""),
                 "branch": plan.get("branch", ""),
-                "task_external_id": "",
+                "task_external_id": step.get("task_external_id", ""),
                 "parent_id": None,
                 "priority": step.get("priority", 5),
                 "created": datetime.now().isoformat(),
@@ -785,6 +785,7 @@ def approve_plan(data: dict):
                     "task_id": str(ct["task_id"]),
                     "project": task.get("project", ""),
                     "branch": task.get("branch", ""),
+                    "task_external_id": task.get("task_external_id", ""),
                     "timestamp": ts,
                 })
 

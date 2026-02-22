@@ -72,9 +72,8 @@ function updateConnectionStatus(status) {
   if (status === 'connected') _lastUpdateTime = Date.now();
   const el = document.getElementById('connectionStatus');
   if (!el) return;
-  const colors = { connected: '#22c55e', reconnecting: '#eab308', error: '#ef4444', offline: '#ef4444', connecting: '#eab308' };
   const labels = { connected: 'Connected', reconnecting: 'Reconnecting...', error: 'Connection Error', offline: 'Offline', connecting: 'Connecting...' };
-  el.innerHTML = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${colors[status]||'#888'};margin-right:4px"></span>${labels[status]||status}`;
+  el.innerHTML = `<span class="conn-dot conn-${status}"></span>${labels[status]||status}`;
   el.style.cursor = status === 'offline' ? 'pointer' : 'default';
   el.onclick = status === 'offline' ? () => { _wsRetries = 0; connectWebSocket(); } : null;
 }
@@ -201,7 +200,17 @@ function _applyDashboardData(d) {
     if (tab === 'inbox') renderPanel();
   }
   if (d.changes && Array.isArray(d.changes)) {
-    reviewData = [...d.changes].sort((a, b) => (b.id || 0) - (a.id || 0));
+    // Deduplicate: keep latest (highest id) pending change per project+branch
+    const deduped = [];
+    const seen = new Map();
+    const sorted = [...d.changes].sort((a, b) => (b.id || 0) - (a.id || 0));
+    for (const c of sorted) {
+      const key = (c.project || '') + '::' + (c.branch || '');
+      if (c.status === 'pending' && c.branch && seen.has(key)) continue;
+      if (c.status === 'pending' && c.branch) seen.set(key, true);
+      deduped.push(c);
+    }
+    reviewData = deduped;
     if (tab === 'review') renderPanel();
   }
   if (tab === 'analytics' && d.analytics) renderPanel();
@@ -259,7 +268,7 @@ function renderSidebar(names) {
     const qBadge = queueCount?`<span class="queue-badge" title="${queueCount} task${queueCount>1?'s':''} in queue">${queueCount}</span>`:'';
     return `<div class="agent-card${n===sel?' sel':''}" onclick="selectAgent('${escAttr(n)}')">
       <div class="agent-dot dot-${dot}"></div>
-      <div style="flex:1;min-width:0">
+      <div class="flex-1" style="min-width:0">
         <div class="agent-name">${esc(n)} ${qBadge} ${rlB} ${exp} ${cost}</div>
         <div class="agent-meta">${a.calls||0} calls · ${tokCost}${formatCost(a.cost||0)}${a.silent_sec>60?' · '+formatAgo(a.silent_sec):''}</div>
         ${prog}
@@ -402,26 +411,19 @@ async function fetchInbox() {
 
 function editAgent(name) {
   const a = (data.agents||{})[name]||{};
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  overlay.innerHTML = `<div class="modal-box" style="width:380px">
-    <h3 style="margin-bottom:12px;font-size:14px">Edit ${esc(name)}</h3>
+  createModal(null, 'modal-w-md', `
+    <h3 class="modal-title">Edit ${esc(name)}</h3>
     <label class="text-sm text-dim">Status</label>
     <select id="_editStatus" class="modal-input"><option ${a.status==='active'?'selected':''}>active</option><option ${a.status==='paused'?'selected':''}>paused</option></select>
     <div class="modal-actions">
       <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
       <button class="modal-btn-ok" onclick="fetch(HUB+'/agents/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent_name:'${escAttr(name)}',status:document.getElementById('_editStatus').value})}).then(()=>{this.closest('.modal-overlay').remove();poll();})">Save</button>
-    </div></div>`;
-  document.body.appendChild(overlay);
+    </div>`, {focusId:'_editStatus'});
 }
 
 function showAddAgentModal() {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  overlay.innerHTML = `<div class="modal-box" style="width:380px">
-    <h3 style="margin-bottom:12px;font-size:14px">Add Agent</h3>
+  createModal(null, 'modal-w-md', `
+    <h3 class="modal-title">Add Agent</h3>
     <label class="text-sm text-dim">Name</label>
     <input id="_addName" class="modal-input" placeholder="e.g. devops">
     <label class="text-sm text-dim">Role (optional)</label>
@@ -429,9 +431,7 @@ function showAddAgentModal() {
     <div class="modal-actions">
       <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
       <button class="modal-btn-ok" onclick="const n=document.getElementById('_addName').value.trim();if(!n)return;fetch(HUB+'/agents/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,role:document.getElementById('_addRole').value.trim()})}).then(()=>{this.closest('.modal-overlay').remove();poll();toast('Agent '+n+' added','success');})">Add</button>
-    </div></div>`;
-  document.body.appendChild(overlay);
-  setTimeout(() => $('_addName')?.focus(), 50);
+    </div>`, {focusId:'_addName'});
 }
 
 let _hideHubNoise = true;
@@ -492,6 +492,20 @@ function formatTokens(n){return n>1e6?(n/1e6).toFixed(1)+'M':n>1e3?(n/1e3).toFix
 function formatCost(c){if(c==null||c===undefined)return'$0.00';c=parseFloat(c)||0;if(c===0)return'$0.00';if(c>=100)return'$'+c.toFixed(0);if(c>=1)return'$'+c.toFixed(2);if(c>=0.01)return'$'+c.toFixed(3);if(c>=0.001)return'$'+c.toFixed(4);if(c>0)return'$'+c.toFixed(5);return'$0.00';}
 function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function escAttr(s){return (s||'').replace(/[^a-zA-Z0-9_-]/g,'');}  // strict for attributes like onclick args
+
+function createModal(id, widthClass, innerHTML, opts={}) {
+  if (id) { const existing = document.getElementById(id); if (existing) { existing.remove(); return null; } }
+  const overlay = document.createElement('div');
+  if (id) overlay.id = id;
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal-box ${widthClass}">${innerHTML}</div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  const onKey = e => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onKey); } };
+  document.addEventListener('keydown', onKey);
+  if (opts.focusId) setTimeout(() => $(opts.focusId)?.focus(), 50);
+  return overlay;
+}
 function formatTime(ts){if(!ts)return'';try{return new Date(ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}catch{return ts;}}
 function formatAgo(sec){if(sec<60)return'';if(sec<120)return'1m ago';if(sec<3600)return Math.floor(sec/60)+'m ago';if(sec<7200)return'1h ago';return Math.floor(sec/3600)+'h ago';}
 // ══════════════════════════════════
@@ -640,12 +654,12 @@ function renderLogs(p){
   if(!sel){
     const names=data.agent_names||[];
     p.innerHTML=`<div class="empty-state" style="padding:60px 20px">
-      <div style="font-size:28px;margin-bottom:12px">📋</div>
-      <div style="font-size:14px;margin-bottom:8px">Select an agent to view logs</div>
-      <div style="font-size:11px;color:var(--fg3);margin-bottom:16px">Click an agent in the sidebar or press <kbd style="color:var(--ac)">1-${names.length||9}</kbd></div>
+      <div class="empty-state-icon">📋</div>
+      <div class="empty-state-title">Select an agent to view logs</div>
+      <div class="empty-state-sub">Click an agent in the sidebar or press <kbd class="text-ac">1-${names.length||9}</kbd></div>
       <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">${names.map((n,i)=>{
         const a=(data.agents||{})[n]||{};const st=a.pipeline||'offline';
-        return`<button onclick="selectAgent('${escAttr(n)}')" style="padding:6px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--fg);cursor:pointer;font-size:11px"><span class="agent-dot dot-${st} dot-inline" style="margin-right:4px"></span>${esc(n)}</button>`;
+        return`<button onclick="selectAgent('${escAttr(n)}')" class="quick-btn"><span class="agent-dot dot-${st} dot-inline" style="margin-right:4px"></span>${esc(n)}</button>`;
       }).join('')}</div></div>`;
     return;
   }
@@ -843,17 +857,17 @@ function renderTasks(p){
   tasks.forEach(t=>{const s=t.status||'created';if(cols[s])cols[s].push(t);else if(s==='assigned'||s==='in_review')cols.in_progress.push(t);else if(s==='cancelled')cols.failed.push(t);});
   p.innerHTML=`<div class="new-task">
     <input id="newTaskDesc" placeholder="New task...">
-    <select id="newTaskAgent">${names.map(n=>`<option value="${n}">${n}</option>`).join('')}</select>
-    <select id="newTaskPriority"><option value="1">P1 Critical</option><option value="3">P3 High</option>
+    <select id="newTaskAgent" class="select-sm">${names.map(n=>`<option value="${n}">${n}</option>`).join('')}</select>
+    <select id="newTaskPriority" class="select-sm"><option value="1">P1 Critical</option><option value="3">P3 High</option>
       <option value="5" selected>P5 Normal</option><option value="8">P8 Low</option></select>
-    <input id="newTaskDeps" placeholder="Deps #" style="width:60px">
+    <input id="newTaskDeps" class="input-sm" placeholder="Deps #" style="width:70px">
     <button onclick="createTask()">+ Add</button>
   </div>
   <div class="new-task" style="margin-bottom:8px">
     <input placeholder="🔍 Search tasks..." value="${esc(taskSearch)}" oninput="taskSearch=this.value;renderPanel()" style="flex:1">
-    <select onchange="taskFilterAgent=this.value;renderPanel()">
+    <select class="select-sm" onchange="taskFilterAgent=this.value;renderPanel()">
       <option value="">All agents</option>${names.map(n=>`<option value="${n}"${taskFilterAgent===n?' selected':''}>${n}</option>`).join('')}</select>
-    <select onchange="taskFilterPriority=this.value;renderPanel()">
+    <select class="select-sm" onchange="taskFilterPriority=this.value;renderPanel()">
       <option value="">All priority</option>${[1,2,3,5,8,10].map(p=>`<option value="${p}"${taskFilterPriority==p?' selected':''}>P${p}</option>`).join('')}</select>
     <span style="font-size:10px;color:var(--fg3)">${tasks.length}/${allTasks.length}</span>
   </div>
@@ -970,66 +984,60 @@ async function showTaskDetail(id){
   const subTasks=(data.tasks||[]).filter(t=>t.created_by===task.assigned_to&&t.id!==id);
   const parentRef=task.description?.match(/#(\d+)/)?.[1];
   
-  const overlay=document.createElement('div');
-  overlay.className='modal-overlay';
-  overlay.addEventListener('click',e=>{if(e.target===overlay)overlay.remove();});
-  
   const statusColors={created:'var(--fg3)',in_progress:'var(--blue)',done:'var(--green)',failed:'var(--red)',cancelled:'var(--fg3)'};
   const statusBg=statusColors[task.status]||'var(--fg3)';
   const names=data.agent_names||[];
-  
-  overlay.innerHTML=`<div class="modal-box" style="width:560px;max-height:85vh;overflow-y:auto">
-    <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:14px">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+
+  createModal(null, 'modal-w-xl modal-scrollable', `
+    <div class="flex-between" style="align-items:start;margin-bottom:14px">
+      <div class="flex-center gap-8" style="flex-wrap:wrap">
         <span class="task-id" style="font-size:18px">#${task.id}</span>
         <span class="task-priority p${task.priority||5}" style="font-size:11px">P${task.priority||5}</span>
         <span style="padding:3px 10px;border-radius:12px;font-size:11px;font-weight:500;background:${statusBg};color:#fff">
           ${statusIcon(task.status||'created')} ${(task.status||'created').replace('_',' ')}
         </span>
       </div>
-      <button style="background:none;border:none;color:var(--fg3);cursor:pointer;font-size:18px;padding:4px" onclick="this.closest('.modal-overlay').remove()">✕</button>
+      <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">✕</button>
     </div>
-    
-    <div style="font-size:13px;color:var(--fg);line-height:1.6;margin-bottom:16px;white-space:pre-wrap;word-break:break-word;padding:10px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">${esc(task.description||'No description')}</div>
-    
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:11px;margin-bottom:16px">
-      <div style="padding:6px 8px;background:var(--bg);border-radius:6px"><span style="color:var(--fg3)">Assigned to</span><br><strong style="color:var(--ac)">${esc(task.assigned_to||'unassigned')}</strong></div>
-      <div style="padding:6px 8px;background:var(--bg);border-radius:6px"><span style="color:var(--fg3)">Created by</span><br><strong>${esc(task.created_by||'user')}</strong></div>
-      ${task.project?`<div style="padding:6px 8px;background:var(--bg);border-radius:6px"><span style="color:var(--fg3)">Project</span><br><strong>${esc(task.project)}</strong></div>`:''}
-      ${task.branch?`<div style="padding:6px 8px;background:var(--bg);border-radius:6px"><span style="color:var(--fg3)">Branch</span><br><code style="color:var(--cyan);font-size:10px">${esc(task.branch)}</code></div>`:''}
-      ${task.task_external_id?`<div style="padding:6px 8px;background:var(--bg);border-radius:6px"><span style="color:var(--fg3)">External ID</span><br><strong style="color:var(--cyan)">${esc(task.task_external_id)}</strong></div>`:''}
-      ${task.depends_on?.length?`<div style="padding:6px 8px;background:var(--bg);border-radius:6px"><span style="color:var(--fg3)">Depends on</span><br><strong style="color:var(--yellow)">#${task.depends_on.join(', #')}</strong></div>`:''}
-      ${task.created_at?`<div style="padding:6px 8px;background:var(--bg);border-radius:6px"><span style="color:var(--fg3)">Created</span><br>${formatTime(task.created_at)}</div>`:''}
-      ${task.updated_at?`<div style="padding:6px 8px;background:var(--bg);border-radius:6px"><span style="color:var(--fg3)">Updated</span><br>${formatTime(task.updated_at)}</div>`:''}
+
+    <div class="task-description-box">${esc(task.description||'No description')}</div>
+
+    <div class="detail-grid">
+      <div class="detail-cell"><span class="detail-label">Assigned to</span><br><strong class="text-ac">${esc(task.assigned_to||'unassigned')}</strong></div>
+      <div class="detail-cell"><span class="detail-label">Created by</span><br><strong>${esc(task.created_by||'user')}</strong></div>
+      ${task.project?`<div class="detail-cell"><span class="detail-label">Project</span><br><strong>${esc(task.project)}</strong></div>`:''}
+      ${task.branch?`<div class="detail-cell"><span class="detail-label">Branch</span><br><code class="text-cyan text-sm">${esc(task.branch)}</code></div>`:''}
+      ${task.task_external_id?`<div class="detail-cell"><span class="detail-label">External ID</span><br><strong class="text-cyan">${esc(task.task_external_id)}</strong></div>`:''}
+      ${task.depends_on?.length?`<div class="detail-cell"><span class="detail-label">Depends on</span><br><strong class="text-yellow">#${task.depends_on.join(', #')}</strong></div>`:''}
+      ${task.created_at?`<div class="detail-cell"><span class="detail-label">Created</span><br>${formatTime(task.created_at)}</div>`:''}
+      ${task.updated_at?`<div class="detail-cell"><span class="detail-label">Updated</span><br>${formatTime(task.updated_at)}</div>`:''}
     </div>
-    
-    ${task.result?`<div style="margin-bottom:14px"><div style="font-size:10px;color:var(--fg3);margin-bottom:4px;font-weight:500">Result</div>
-      <div style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:11px;white-space:pre-wrap;max-height:200px;overflow-y:auto">${esc(task.result)}</div>
+
+    ${task.result?`<div class="mb-16"><div class="text-sm text-dim mb-4 font-bold">Result</div>
+      <div class="detail-cell word-break" style="font-size:11px;max-height:200px;overflow-y:auto;border:1px solid var(--border)">${esc(task.result)}</div>
     </div>`:''}
-    
-    ${subTasks.length?`<div style="margin-bottom:14px"><div style="font-size:10px;color:var(--fg3);margin-bottom:4px;font-weight:500">Related Sub-tasks</div>
-      ${subTasks.slice(0,10).map(st=>`<div style="display:flex;gap:6px;align-items:center;padding:3px 0;font-size:11px">
-        <span style="color:var(--fg3)">#${st.id}</span>
+
+    ${subTasks.length?`<div class="mb-16"><div class="text-sm text-dim mb-4 font-bold">Related Sub-tasks</div>
+      ${subTasks.slice(0,10).map(st=>`<div class="subtask-item">
+        <span class="text-dim">#${st.id}</span>
         <span>${statusIcon(st.status)} ${esc(st.assigned_to||'?')}</span>
-        <span style="color:var(--fg2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((st.description||'').substring(0,80))}</span>
+        <span class="text-muted truncate flex-1">${esc((st.description||'').substring(0,80))}</span>
       </div>`).join('')}
     </div>`:''}
-    
+
     <div class="modal-actions" style="flex-wrap:wrap;gap:6px">
-      ${task.status==='created'?`<select id="_reassign" style="padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:11px">
+      ${task.status==='created'?`<select id="_reassign" class="select-sm">
         ${names.map(n=>`<option value="${esc(n)}"${n===task.assigned_to?' selected':''}>${esc(n)}</option>`).join('')}
       </select>
       <button class="modal-btn-ok" onclick="reassignTask(${task.id},$('_reassign').value);this.closest('.modal-overlay').remove()">▶ Assign & Start</button>`:''}
-      <select onchange="changePriority(${task.id},this.value)" style="padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:11px">
+      <select class="select-sm" onchange="changePriority(${task.id},this.value)">
         ${[1,3,5,8,10].map(pr=>`<option value="${pr}"${(task.priority||5)==pr?' selected':''}>P${pr}${pr===1?' Critical':pr===3?' High':pr===5?' Normal':pr===8?' Low':' Lowest'}</option>`).join('')}
       </select>
       ${task.status==='in_progress'?`<button class="modal-btn-cancel" style="background:var(--red);color:#fff;border:none" onclick="cancelTask(${task.id});this.closest('.modal-overlay').remove()">✗ Cancel</button>`:''}
-      ${task.status==='in_progress'?`<button style="padding:5px 10px;background:var(--yellow);border:none;border-radius:6px;color:#000;cursor:pointer;font-size:11px" onclick="restartAgent('${escAttr(task.assigned_to)}');this.closest('.modal-overlay').remove()" title="Restart the agent working on this">⟲ Restart Agent</button>`:''}
-      ${['done','failed','cancelled'].includes(task.status)?`<button style="padding:5px 10px;background:var(--cyan);border:none;border-radius:6px;color:#000;cursor:pointer;font-size:11px;font-weight:500" onclick="retryTask(${task.id},'${escAttr(task.assigned_to)}');this.closest('.modal-overlay').remove()">↻ Retry</button>`:''}
+      ${task.status==='in_progress'?`<button class="btn-action btn-action-warn" onclick="restartAgent('${escAttr(task.assigned_to)}');this.closest('.modal-overlay').remove()" title="Restart the agent working on this">⟲ Restart Agent</button>`:''}
+      ${['done','failed','cancelled'].includes(task.status)?`<button class="btn-action btn-action-info" onclick="retryTask(${task.id},'${escAttr(task.assigned_to)}');this.closest('.modal-overlay').remove()">↻ Retry</button>`:''}
       <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Close</button>
-    </div>
-  </div>`;
-  document.body.appendChild(overlay);
+    </div>`);
 }
 
 async function reassignTask(id,agent){
@@ -1164,7 +1172,7 @@ function renderInbox(p){
             <span class="bubble-type" style="background:var(--green);color:#000">review</span>
             ${displayContent}${isLong?`<span class="bubble-collapsed" data-full="${fullContent.replace(/"/g,'&quot;')}">… <button class="bubble-toggle" onclick="expandBubble(this)">Show more</button></span>`:''}
             <div class="commit-actions" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
-              <input id="${commitId}" class="commit-msg-input" value="${escAttr(suggested)}" placeholder="Commit message..." style="width:100%;padding:6px 8px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px;margin-bottom:6px">
+              <input id="${commitId}" class="commit-msg-input" value="${escAttr(suggested)}" placeholder="Commit message..." style="margin-bottom:6px">
               <div class="flex-center gap-4">
                 <button class="btn-sm" style="background:var(--green);color:#000" onclick="commitChanges('${escAttr(proj)}','${commitId}')">✓ Commit</button>
                 <button class="btn-sm" style="background:var(--ac);color:#fff" onclick="commitAndPush('${escAttr(proj)}','${commitId}')">🚀 Commit & Push</button>
@@ -1356,7 +1364,7 @@ function renderReview(p){
     <button class="tab-btn${reviewFilter==='dismissed'?' active':''}" onclick="reviewFilter='dismissed';renderReview($('panel'))">
       ✗ Dismissed <span class="badge" style="display:inline;background:var(--fg3)">${counts.dismissed}</span></button>
     <button class="tab-btn${!reviewFilter?' active':''}" onclick="reviewFilter='';renderReview($('panel'))">All (${all.length})</button>
-    ${projects.length>1?`<select class="select-sm" style="max-width:160px" onchange="reviewFilterProject=this.value;renderReview($('panel'))">
+    ${projects.length>1?`<select class="select-sm" onchange="reviewFilterProject=this.value;renderReview($('panel'))">
       <option value="">All projects</option>
       ${projects.map(pr=>`<option value="${escAttr(pr)}"${reviewFilterProject===pr?' selected':''}>${esc(pr)}</option>`).join('')}
     </select>`:''}
@@ -1380,7 +1388,7 @@ function renderReview(p){
     </div>
     ${c.description?`<div class="text-sm text-muted truncate" style="margin:4px 0">${esc(c.description).substring(0,200)}</div>`:''}
     ${c.status==='pending'?`<div style="margin:6px 0">
-      <input id="rc_msg_${c.id}" class="commit-msg-input" value="${escAttr(taskRef+' | '+cleanTitle((c.description||'').substring(0,80)))}" placeholder="Commit message..." style="width:100%;padding:5px 8px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px;margin-bottom:4px">
+      <input id="rc_msg_${c.id}" class="commit-msg-input" value="${escAttr(taskRef+' | '+cleanTitle((c.description||'').substring(0,80)))}" placeholder="Commit message..." style="margin-bottom:4px">
       <div class="flex-center gap-4">
         <button class="btn-sm" style="background:var(--green);color:#000" onclick="commitChanges('${escAttr(c.project)}','rc_msg_${c.id}',${c.id})">✓ Commit</button>
         <button class="btn-sm" style="background:var(--ac);color:#fff" onclick="commitAndPush('${escAttr(c.project)}','rc_msg_${c.id}',${c.id})">🚀 Commit & Push</button>
@@ -1488,7 +1496,7 @@ function modelBreakdownHTML(ba){
   return`<div class="model-breakdown"><div style="font-size:11px;color:var(--fg2);margin-bottom:8px">Model Usage</div>
     <div class="model-bar"><div class="model-sonnet" style="width:${sp}%">${sp>10?'Sonnet '+sp+'%':''}</div>
       <div class="model-opus" style="width:${op}%">${op>10?'Opus '+op+'%':''}</div>${ht?`<div class="model-haiku" style="width:${hp}%;background:var(--green)">${hp>10?'Haiku '+hp+'%':''}</div>`:''}</div>
-    <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:10px;color:var(--fg2)">
+    <div class="model-legend">
       <span>🔵 Sonnet: ${formatTokens(st)}</span><span>🟣 Opus: ${formatTokens(ot)}</span>${ht?`<span>🟢 Haiku: ${formatTokens(ht)}</span>`:''}</div></div>`;
 }
 
@@ -1518,10 +1526,8 @@ async function disconnectService(svcId){
 }
 
 function showManualCred(){
-  const overlay=document.createElement('div');
-  overlay.className='modal-overlay';
-  overlay.innerHTML=`<div class="modal-box" style="width:380px">
-    <h3 class="mb-12" style="font-size:14px">🔑 Manual Credential</h3>
+  createModal(null, 'modal-w-md', `
+    <h3 class="modal-title">🔑 Manual Credential</h3>
     <label class="text-base text-muted mb-4" style="display:block">Key</label>
     <input id="_mcKey" class="modal-input" placeholder="e.g. FIGMA_ACCESS_TOKEN">
     <label class="text-base text-muted" style="display:block;margin:8px 0 4px">Value</label>
@@ -1529,10 +1535,7 @@ function showManualCred(){
     <div class="modal-actions">
       <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
       <button class="modal-btn-ok" onclick="saveManualCred()">Save</button>
-    </div>
-  </div>`;
-  document.body.appendChild(overlay);
-  setTimeout(()=>$('_mcKey')?.focus(),50);
+    </div>`, {focusId:'_mcKey'});
 }
 
 async function saveManualCred(){
@@ -1546,22 +1549,21 @@ async function saveManualCred(){
 
 async function showServiceWizard(preselect){
   let svcs=[];try{svcs=(await(await fetch(HUB+'/services')).json()).services||[];}catch{return;}
-  const overlay=document.createElement('div');
-  overlay.className='modal-overlay';
 
   if(preselect){
     // Direct connect for specific service
     const svc=svcs.find(s=>s.id===preselect);
-    if(!svc){overlay.remove();return;}
+    if(!svc)return;
+    const overlay=createModal(null, 'modal-w-lg', '');
+    if(!overlay)return;
     renderServiceForm(overlay,svc);
-    document.body.appendChild(overlay);
     return;
   }
 
   // Service picker
-  overlay.innerHTML=`<div class="modal-box" style="width:480px;max-height:80vh;overflow-y:auto">
-    <h3 style="margin-bottom:4px;font-size:15px">🔗 Connect a Service</h3>
-    <p style="font-size:11px;color:var(--fg3);margin-bottom:14px">Connect MCP tools to external services. Click a service to authenticate.</p>
+  const overlay=createModal(null, 'modal-w-lg modal-scrollable', `
+    <h3 class="modal-title">🔗 Connect a Service</h3>
+    <p class="text-base text-dim mb-16">Connect MCP tools to external services. Click a service to authenticate.</p>
     <div class="service-grid" id="_svcGrid">${svcs.map(s=>`<div class="service-card${s.connected?' connected':''}" data-svc="${escAttr(s.id)}">
       <span class="service-icon" style="background:${s.color||'#666'}">${s.icon}</span>
       <span class="service-name">${esc(s.name)}</span>
@@ -1569,9 +1571,8 @@ async function showServiceWizard(preselect){
     </div>`).join('')}</div>
     <div class="modal-actions">
       <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Close</button>
-    </div>
-  </div>`;
-  document.body.appendChild(overlay);
+    </div>`);
+  if(!overlay)return;
   // Delegate click handling
   const grid=$('_svcGrid');
   if(grid) grid.addEventListener('click',e=>{
@@ -1650,18 +1651,15 @@ async function saveServiceCreds(svcId,keys){
 //  ACTIONS
 // ══════════════════════════════════
 async function removeAgent(n){
-  const overlay=document.createElement('div');overlay.className='modal-overlay';
-  overlay.addEventListener('click',e=>{if(e.target===overlay)overlay.remove();});
   const tasks=(data.tasks||[]).filter(t=>t.assigned_to===n&&['created','assigned','in_progress'].includes(t.status));
-  overlay.innerHTML=`<div class="modal-box" style="width:360px;text-align:center">
-    <div style="font-size:28px;margin-bottom:8px">⚠️</div>
-    <h3 style="margin-bottom:8px">Remove "${esc(n)}"?</h3>
-    ${tasks.length?`<p style="font-size:12px;color:var(--yellow);margin-bottom:8px">${tasks.length} active task(s) will be unassigned</p>`:''}
+  createModal(null, 'modal-w-sm', `<div style="text-align:center">
+    <div class="confirm-icon">⚠️</div>
+    <h3 class="mb-8">Remove "${esc(n)}"?</h3>
+    ${tasks.length?`<p class="confirm-warn">${tasks.length} active task(s) will be unassigned</p>`:''}
     <div class="modal-actions" style="justify-content:center">
       <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
       <button class="modal-btn-ok" style="background:var(--red)" onclick="fetch(HUB+'/agents/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'${escAttr(n)}'})}).then(()=>{this.closest('.modal-overlay').remove();toast('Removed '+${JSON.stringify(n)},'info');poll();})">Remove</button>
-    </div></div>`;
-  document.body.appendChild(overlay);
+    </div></div>`);
 }
 
 async function stopAgent(n){
@@ -1681,21 +1679,18 @@ function _cmdContext() {
   const tasks_list = (data.tasks || []).filter(t => t.assigned_to === sel);
   const activeTasks = tasks_list.filter(t => t.status === 'in_progress');
   const doneTasks = tasks_list.filter(t => t.status === 'done');
-  const overlay = document.createElement('div'); overlay.className = 'modal-overlay';
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  overlay.innerHTML = `<div class="modal-box" style="width:480px"><h3 style="margin-bottom:12px;font-size:14px">Context: ${esc(sel)}</h3>
+  createModal(null, 'modal-w-lg', `<h3 class="modal-title">Context: ${esc(sel)}</h3>
     <div style="display:grid;grid-template-columns:120px 1fr;gap:6px;font-size:12px">
-      <span style="color:var(--fg3)">Status</span><span>${esc(a.pipeline || 'unknown')}</span>
-      <span style="color:var(--fg3)">Calls</span><span>${a.calls || 0}</span>
-      <span style="color:var(--fg3)">Tokens (in/out)</span><span>${formatTokens(u.tokens_in || 0)} / ${formatTokens(u.tokens_out || 0)}</span>
-      <span style="color:var(--fg3)">Cost</span><span>${formatCost(a.cost || 0)}</span>
-      <span style="color:var(--fg3)">Active tasks</span><span>${activeTasks.length ? activeTasks.map(t => '#' + t.id).join(', ') : 'none'}</span>
-      <span style="color:var(--fg3)">Completed</span><span>${doneTasks.length} tasks</span>
-      <span style="color:var(--fg3)">Expertise</span><span>${a.expertise || 'general'}</span>
-      <span style="color:var(--fg3)">Silent</span><span>${a.silent_sec ? formatAgo(a.silent_sec) : 'active'}</span>
+      <span class="text-dim">Status</span><span>${esc(a.pipeline || 'unknown')}</span>
+      <span class="text-dim">Calls</span><span>${a.calls || 0}</span>
+      <span class="text-dim">Tokens (in/out)</span><span>${formatTokens(u.tokens_in || 0)} / ${formatTokens(u.tokens_out || 0)}</span>
+      <span class="text-dim">Cost</span><span>${formatCost(a.cost || 0)}</span>
+      <span class="text-dim">Active tasks</span><span>${activeTasks.length ? activeTasks.map(t => '#' + t.id).join(', ') : 'none'}</span>
+      <span class="text-dim">Completed</span><span>${doneTasks.length} tasks</span>
+      <span class="text-dim">Expertise</span><span>${a.expertise || 'general'}</span>
+      <span class="text-dim">Silent</span><span>${a.silent_sec ? formatAgo(a.silent_sec) : 'active'}</span>
     </div>
-    <div class="modal-actions"><button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Close</button></div></div>`;
-  document.body.appendChild(overlay);
+    <div class="modal-actions"><button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Close</button></div>`);
 }
 
 async function _runCheck(type, args) {
@@ -1709,12 +1704,10 @@ async function _runCheck(type, args) {
   }
   const task = (data.tasks || []).find(t => t.id == tid);
   if (!task) { toast(`Task #${tid} not found`, 'error'); return; }
-  const overlay = document.createElement('div'); overlay.className = 'modal-overlay';
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  overlay.innerHTML = `<div class="modal-box" style="width:560px">
-    <h3>${type === 'dev' ? '🔍 Dev Check' : '🧪 QA Check'} — Task #${tid}</h3>
-    <div style="margin:10px 0;font-size:12px;color:var(--fg2)">${esc((task.description || '').substring(0, 200))}</div>
-    <div style="margin:10px 0;font-size:11px">
+  createModal(null, 'modal-w-xl', `
+    <h3 class="modal-title">${type === 'dev' ? '🔍 Dev Check' : '🧪 QA Check'} — Task #${tid}</h3>
+    <div class="text-md text-muted" style="margin:10px 0">${esc((task.description || '').substring(0, 200))}</div>
+    <div class="text-base" style="margin:10px 0">
       Agent: <strong>${esc(task.assigned_to || '?')}</strong> ·
       Status: <strong>${esc(task.status)}</strong>
       ${task.branch ? ' · Branch: <code>' + esc(task.branch) + '</code>' : ''}
@@ -1724,9 +1717,7 @@ async function _runCheck(type, args) {
         ▶ Run ${type === 'dev' ? 'Dev' : 'QA'} Check
       </button>
       <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
-    </div>
-  </div>`;
-  document.body.appendChild(overlay);
+    </div>`);
 }
 
 async function startCheck(type, tid) {
@@ -1826,8 +1817,35 @@ function closeEditor(apply, send) {
 
 // ── Help ──
 function showHelp(){
-  const lines=Object.entries(_slashCommands).map(([k,v])=>`<b>${k}</b>${v.args?' '+v.args:''} — ${v.desc}`);
-  toast(lines.join('<br>'),'info',8000);
+  const existing=$('helpOverlay');if(existing){existing.remove();return;}
+  const shortcuts=[
+    ['Enter','Send message'],
+    ['Shift+Enter','New line'],
+    ['Ctrl+O','Expand editor'],
+    ['↑ / ↓','Navigate agents'],
+    ['?','This help dialog'],
+  ];
+  const overlay=document.createElement('div');
+  overlay.id='helpOverlay';
+  overlay.className='modal-overlay';
+  overlay.innerHTML=`<div class="modal-box help-modal">
+    <div class="help-modal-header"><h3>Keyboard Shortcuts & Commands</h3><button class="btn-icon" onclick="$('helpOverlay').remove()" style="font-size:16px">✕</button></div>
+    <div class="help-columns">
+      <div class="help-section">
+        <h4>Shortcuts</h4>
+        ${shortcuts.map(([k,d])=>`<div class="help-row"><kbd>${k}</kbd><span>${d}</span></div>`).join('')}
+      </div>
+      <div class="help-section">
+        <h4>Slash Commands</h4>
+        ${Object.entries(_slashCommands).map(([k,v])=>`<div class="help-row"><kbd>${k}${v.args?' '+v.args:''}</kbd><span>${v.desc}</span></div>`).join('')}
+      </div>
+    </div>
+    <div style="text-align:center;margin-top:12px;font-size:10px;color:var(--fg3)">Press <kbd>Esc</kbd> or click outside to close</div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click',e=>{if(e.target===overlay)overlay.remove();});
+  const onKey=e=>{if(e.key==='Escape'){overlay.remove();document.removeEventListener('keydown',onKey);}};
+  document.addEventListener('keydown',onKey);
 }
 
 // ── Slash Commands ──
@@ -2020,7 +2038,11 @@ async function exportSession(){try{
 
 async function fetchChanges(){try{
   const c=await(await fetch(HUB+'/changes')).json();
-  if(Array.isArray(c)){reviewData=[...c].sort((a,b)=>(b.id||0)-(a.id||0));if(tab==='review')renderPanel();updateBadges();}
+  if(Array.isArray(c)){
+    const sorted=[...c].sort((a,b)=>(b.id||0)-(a.id||0));
+    const deduped=[],seen=new Map();
+    for(const x of sorted){const key=(x.project||'')+'::'+(x.branch||'');if(x.status==='pending'&&x.branch&&seen.has(key))continue;if(x.status==='pending'&&x.branch)seen.set(key,true);deduped.push(x);}
+    reviewData=deduped;if(tab==='review')renderPanel();updateBadges();}
 }catch{}}
 
 async function reviewChange(id,s){await fetch(HUB+'/changes/'+id+'/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:s})});setTimeout(()=>{fetchChanges();poll();},300);}

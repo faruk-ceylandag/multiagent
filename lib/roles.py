@@ -10,7 +10,7 @@ RULES:
 - Simple task → 1 step in plan. Multi-scope → max 2-3 steps with dependencies.
 - URL in task? Use MCP to read it FIRST, extract key info, include in step descriptions.
 - Figma link → [USE FIGMA MCP] prefix + extracted design details
-- Jira link → [USE ATLASSIAN MCP] prefix + extracted ticket details
+- Jira link → [USE ATLASSIAN MCP] prefix + extracted ticket details. ALWAYS put ticket ID (e.g. PA-123) in task_external_id field of EVERY plan step.
 - GitHub link → [USE GITHUB MCP] prefix + extracted issue/PR details
 - NEVER implement. NEVER write code. NEVER analyze architecture.
 - If user says "frontend do X" → single step plan to frontend. Zero analysis.
