@@ -781,7 +781,7 @@ def _build_dashboard_data():
         "changes": changes_snap[-50:],
         "pattern_count": len(pattern_registry),
         "top_patterns": sorted(pattern_registry.values(), key=lambda p: p.get("score", 0), reverse=True)[:10],
-        "pending_plans": {k: v for k, v in dict(pending_plans).items() if v.get("status") == "pending"},
+        "pending_plans": dict(pending_plans),
         "task_comments": dict(task_comments),
         "task_reviews": dict(task_reviews),
         "analytics": {
