@@ -556,8 +556,10 @@ while True:
                 set_status(ctx, "idle")
                 continue
 
-        is_task = any(m.get("msg_type") == "task" or
+        _TASK_MSG_TYPES = {"task", "qa_feedback", "review_feedback"}
+        is_task = any(m.get("msg_type") in _TASK_MSG_TYPES or
                      (m.get("msg_type") == "message" and len(m.get("content", "")) > 10) for m in msgs)
+        _is_rework = any(m.get("msg_type") in ("qa_feedback", "review_feedback") for m in msgs)
         is_chat_only = all(m.get("msg_type") == "chat" for m in msgs if m.get("sender") == "user")
 
         # ── System "task unblocked" notifications → fetch real task from hub ──
@@ -614,7 +616,7 @@ while True:
         # Architect/QA/reviewers: fresh session each task (independent tasks, no carry-over)
         # Dev agents: keep session for multi-call conversation continuity
         _fresh_session_roles = {"architect", "qa", "reviewer-logic", "reviewer-style", "reviewer-arch"}
-        if ctx.AGENT_NAME in _fresh_session_roles:
+        if ctx.AGENT_NAME in _fresh_session_roles or _is_rework:
             ctx.SESSION_ID = None
         elif ctx.SESSION_ID and not ctx.valid_sid(ctx.SESSION_ID):
             ctx.SESSION_ID = None

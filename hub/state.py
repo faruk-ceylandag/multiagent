@@ -37,6 +37,15 @@ for _a in _cfg.get("agents", []):
     if isinstance(_a, dict) and _a.get("hidden"):
         HIDDEN_AGENTS.add(_a["name"])
 VISIBLE_AGENTS = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
+
+# ── Ensure reviewers always exist (even if multiagent.json omits them) ──
+_REQUIRED_REVIEWERS = ["reviewer-logic", "reviewer-style", "reviewer-arch"]
+for _rn in _REQUIRED_REVIEWERS:
+    if _rn not in ALL_AGENTS:
+        ALL_AGENTS.append(_rn)
+    HIDDEN_AGENTS.add(_rn)
+VISIBLE_AGENTS[:] = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
+
 MAX_TASKS = 500
 BUDGET_LIMIT = float(_cfg.get("budget_limit", 0))
 BUDGET_PER_AGENT = float(_cfg.get("budget_per_agent", 0))
@@ -640,6 +649,11 @@ def _config_reload_timer():
                         for a in new_agents_cfg:
                             if isinstance(a, dict) and a.get("hidden"):
                                 new_hidden.add(a["name"])
+                        # Inject required reviewers into reloaded config
+                        for _rn in _REQUIRED_REVIEWERS:
+                            if _rn not in new_all:
+                                new_all.append(_rn)
+                            new_hidden.add(_rn)
                         if set(new_all) != set(ALL_AGENTS) or new_hidden != HIDDEN_AGENTS:
                             ALL_AGENTS[:] = new_all
                             HIDDEN_AGENTS.clear()
