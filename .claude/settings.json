@@ -1,0 +1,76 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(git:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(ps:*)",
+      "Bash(wc:*)",
+      "Bash(diff:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "WebSearch",
+      "mcp__context7__*",
+      "mcp__github__*",
+      "mcp__atlassian__*",
+      "mcp__figma__*",
+      "mcp__sentry__*",
+      "mcp__sequentialthinking__*",
+      "mcp__memory__*",
+      "mcp__google__*",
+      "mcp__playwright__*",
+      "mcp__chrome-devtools__*"
+    ],
+    "deny": []
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport sys,json\ntry:\n    inp=json.load(sys.stdin)\n    fp=inp.get('tool_input',{}).get('file_path','')\n    if not fp: sys.exit(0)\n    import os\n    base = os.path.basename(fp)\n    blocked = ['.env','credentials.env','secrets','id_rsa','id_ed25519','.env.local','.env.production']\n    if any(base == b or base.startswith(b) for b in blocked):\n        print(f'BLOCKED: {base} is a sensitive file',file=sys.stderr)\n        sys.exit(2)\n    blocked_patterns = ['.multiagent/state/', '.multiagent/locks/', 'hub_state.json']\n    if any(p in fp for p in blocked_patterns):\n        print(f'BLOCKED: {base} is a runtime state file — edit via API instead',file=sys.stderr)\n        sys.exit(2)\nexcept Exception: pass\n\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash(git commit*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/scripts/update_changelog.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Write(*.py)|Edit(*.py)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -m ruff check --fix \"$CLAUDE_FILE_PATH\" 2>/dev/null || true"
+          },
+          {
+            "type": "command",
+            "command": "python3 -m pyright --outputjson \"$CLAUDE_FILE_PATH\" 2>/dev/null | python3 -c \"import sys,json; d=json.load(sys.stdin); errs=[x for x in d.get('generalDiagnostics',[]) if x['severity']=='error']; [print(f\\\"L{e['range']['start']['line']}: {e['message']}\\\") for e in errs[:5]]; sys.exit(2 if errs else 0)\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "context7",
+    "github",
+    "atlassian",
+    "figma",
+    "sentry",
+    "sequentialthinking",
+    "memory",
+    "google",
+    "playwright",
+    "chrome-devtools"
+  ]
+}
