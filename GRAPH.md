@@ -467,7 +467,7 @@ User actions (REST calls from dashboard):
 | Save interval | 10s | state.py | State persistence check |
 | Backup rotation | 5 min | state.py | .bak.1/.bak.2/.bak.3 cycle |
 
-## Safety Guards (CRITICAL — do not remove)
+## Safety Guards
 
 These guards prevent subtle lifecycle bugs. Each was added to fix a real failure mode.
 
