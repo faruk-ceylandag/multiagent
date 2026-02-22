@@ -488,7 +488,7 @@ function getAgentTokens(n){const u=(data.usage||{})[n];return u?(u.tokens_in||0)
 function formatTokens(n){return n>1e6?(n/1e6).toFixed(1)+'M':n>1e3?(n/1e3).toFixed(1)+'K':n+'';}
 function formatCost(c){if(c==null||c===undefined)return'$0.00';c=parseFloat(c)||0;if(c===0)return'$0.00';if(c>=100)return'$'+c.toFixed(0);if(c>=1)return'$'+c.toFixed(2);if(c>=0.01)return'$'+c.toFixed(3);if(c>=0.001)return'$'+c.toFixed(4);if(c>0)return'$'+c.toFixed(5);return'$0.00';}
 function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
-function escAttr(s){return (s||'').replace(/[^a-zA-Z0-9_-]/g,'');}  // strict for attributes like onclick args
+function escAttr(s){return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}  // safe for HTML attribute values
 function formatTime(ts){if(!ts)return'';try{return new Date(ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}catch{return ts;}}
 function formatAgo(sec){if(sec<60)return'';if(sec<120)return'1m ago';if(sec<3600)return Math.floor(sec/60)+'m ago';if(sec<7200)return'1h ago';return Math.floor(sec/3600)+'h ago';}
 // ══════════════════════════════════
