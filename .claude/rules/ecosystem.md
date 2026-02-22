@@ -22,11 +22,16 @@ ecosystem/
 
 ## Boot-time Setup
 
-`setup_agent_ecosystem()` runs once per agent at start:
-1. Copy subagents, commands, skills to agent's `.claude/` dir
-2. Generate hooks config + settings.json
-3. Generate .mcp.json with credentials
-4. Adopt project-level ecosystem (subagents, commands from workspace projects)
+Two-phase setup: shared content once, per-agent configs per agent.
+
+`setup_shared_ecosystem(ma_dir, workspace)` — runs ONCE at start:
+1. Copy subagents, commands, skills to `MA_DIR/.claude/` (shared)
+2. Adopt project-level ecosystem (subagents, commands from workspace projects)
+
+`setup_agent_ecosystem()` — runs per agent:
+1. Symlink `agents/`, `commands/`, `skills/` from agent's `.claude/` → shared `MA_DIR/.claude/`
+2. Generate hooks config + settings.json (per-agent — permissions differ by role)
+3. Generate .mcp.json with credentials (per-agent)
 
 ## Runtime Tool Discovery
 
@@ -35,6 +40,7 @@ ecosystem/
 - Diffs ecosystem/commands vs .claude/commands — copies new .md files
 - Diffs ecosystem/skills vs .claude/skills — copies new skill dirs
 - Returns list of newly discovered tool names
+- Writes go through symlinks to shared dir → all agents see updates instantly
 
 This means: drop a new .md in ecosystem/subagents/ and agents pick it up at their next task without restart.
 

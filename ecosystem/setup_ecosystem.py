@@ -15,40 +15,38 @@ import json, os, shutil, sys
 
 ECOSYSTEM_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def setup_agent_ecosystem(agent_name, agent_cwd, ma_dir, workspace, hub_url, stack_info=None):
-    """Full ecosystem setup for a single agent."""
+def setup_shared_ecosystem(ma_dir, workspace):
+    """Set up shared ecosystem content (agents, commands, skills) once for all agents.
+
+    Content is stored in MA_DIR/.claude/ and symlinked from each agent's session dir.
+    """
+    shared_claude = os.path.join(ma_dir, ".claude")
     results = []
 
-    # 1. Claude directory
-    claude_dir = os.path.join(agent_cwd, ".claude")
-    os.makedirs(claude_dir, exist_ok=True)
-    os.makedirs(os.path.join(claude_dir, "commands"), exist_ok=True)
-    os.makedirs(os.path.join(claude_dir, "agents"), exist_ok=True)
-
-    # 2. Copy subagents
+    # 1. Copy subagents to shared location
     subagents_src = os.path.join(ECOSYSTEM_DIR, "subagents")
+    agents_dst = os.path.join(shared_claude, "agents")
+    os.makedirs(agents_dst, exist_ok=True)
     if os.path.isdir(subagents_src):
-        agents_dst = os.path.join(claude_dir, "agents")
         for f in os.listdir(subagents_src):
             if f.endswith(".md"):
                 shutil.copy2(os.path.join(subagents_src, f), os.path.join(agents_dst, f))
-        results.append(f"  subagents: {len(os.listdir(agents_dst))} installed")
 
-    # 3. Copy slash commands
+    # 2. Copy slash commands to shared location
     commands_src = os.path.join(ECOSYSTEM_DIR, "commands")
+    commands_dst = os.path.join(shared_claude, "commands")
+    os.makedirs(commands_dst, exist_ok=True)
     if os.path.isdir(commands_src):
-        commands_dst = os.path.join(claude_dir, "commands")
         for f in os.listdir(commands_src):
             if f.endswith(".md"):
                 shutil.copy2(os.path.join(commands_src, f), os.path.join(commands_dst, f))
-        results.append(f"  commands: {len(os.listdir(commands_dst))} installed")
 
-    # 3b. Copy skills (e.g. translation_sql_writer)
+    # 3. Copy skills to shared location
     skills_src = os.path.join(ECOSYSTEM_DIR, "skills")
+    skills_dst = os.path.join(shared_claude, "skills")
+    os.makedirs(skills_dst, exist_ok=True)
+    skill_count = 0
     if os.path.isdir(skills_src):
-        skills_dst = os.path.join(claude_dir, "skills")
-        os.makedirs(skills_dst, exist_ok=True)
-        skill_count = 0
         for skill_name in os.listdir(skills_src):
             skill_dir = os.path.join(skills_src, skill_name)
             if not os.path.isdir(skill_dir):
@@ -58,34 +56,60 @@ def setup_agent_ecosystem(agent_name, agent_cwd, ma_dir, workspace, hub_url, sta
             for f in os.listdir(skill_dir):
                 shutil.copy2(os.path.join(skill_dir, f), os.path.join(dst_dir, f))
             skill_count += 1
-        if skill_count:
-            results.append(f"  skills: {skill_count} installed")
 
-    # 3c. Adopt discovered project ecosystem (subagents, commands, skills from workspace projects)
+    # 4. Adopt project-level ecosystem (subagents, commands from workspace projects)
     try:
         for proj in os.listdir(workspace):
             proj_dir = os.path.join(workspace, proj)
             if not os.path.isdir(proj_dir) or proj.startswith("."):
                 continue
-            disc = discover_project_ecosystem(proj_dir)
-            # Adopt project subagents not already present
             proj_agents_dir = os.path.join(proj_dir, ".claude", "agents")
             if os.path.isdir(proj_agents_dir):
-                agents_dst = os.path.join(claude_dir, "agents")
                 for f in os.listdir(proj_agents_dir):
                     if f.endswith(".md") and not os.path.exists(os.path.join(agents_dst, f)):
                         shutil.copy2(os.path.join(proj_agents_dir, f), os.path.join(agents_dst, f))
-            # Adopt project commands not already present
             proj_cmds_dir = os.path.join(proj_dir, ".claude", "commands")
             if os.path.isdir(proj_cmds_dir):
-                commands_dst = os.path.join(claude_dir, "commands")
                 for f in os.listdir(proj_cmds_dir):
                     if f.endswith(".md") and not os.path.exists(os.path.join(commands_dst, f)):
                         shutil.copy2(os.path.join(proj_cmds_dir, f), os.path.join(commands_dst, f))
     except Exception:
         pass  # Discovery is best-effort, don't break boot
 
-    # 4. Generate hooks + settings.json
+    agent_count = len([f for f in os.listdir(agents_dst) if f.endswith(".md")])
+    cmd_count = len([f for f in os.listdir(commands_dst) if f.endswith(".md")])
+    results.append(f"  subagents: {agent_count} installed")
+    results.append(f"  commands: {cmd_count} installed")
+    if skill_count:
+        results.append(f"  skills: {skill_count} installed")
+
+    return results
+
+
+def setup_agent_ecosystem(agent_name, agent_cwd, ma_dir, workspace, hub_url, stack_info=None):
+    """Per-agent setup: symlink shared content + generate agent-specific configs."""
+    results = []
+
+    claude_dir = os.path.join(agent_cwd, ".claude")
+    os.makedirs(claude_dir, exist_ok=True)
+
+    # Symlink shared directories (agents, commands, skills)
+    shared_claude = os.path.join(ma_dir, ".claude")
+    for subdir in ("agents", "commands", "skills"):
+        shared_path = os.path.join(shared_claude, subdir)
+        agent_path = os.path.join(claude_dir, subdir)
+        if not os.path.isdir(shared_path):
+            continue
+        # Remove old copy/symlink
+        if os.path.islink(agent_path):
+            os.unlink(agent_path)
+        elif os.path.isdir(agent_path):
+            shutil.rmtree(agent_path)
+        # Create relative symlink
+        rel_target = os.path.relpath(shared_path, claude_dir)
+        os.symlink(rel_target, agent_path)
+
+    # Generate hooks + settings.json (per-agent — permissions differ by role)
     if stack_info is None:
         stack_info = _load_stack(ma_dir)
 
@@ -98,10 +122,9 @@ def setup_agent_ecosystem(agent_name, agent_cwd, ma_dir, workspace, hub_url, sta
     hook_count = len(hooks.get("PreToolUse", [])) + len(hooks.get("PostToolUse", []))
     results.append(f"  hooks: {hook_count} configured")
 
-    # 5. MCP config (.mcp.json in agent CWD)
+    # MCP config (per-agent — includes credentials)
     from ecosystem.mcp.setup_mcp import generate_mcp_json
     cfg = _load_config(ma_dir)
-    # Load credentials for MCP env injection
     _creds = {}
     _creds_file = os.path.join(ma_dir, "credentials.env")
     if os.path.exists(_creds_file):
@@ -432,6 +455,9 @@ if __name__ == "__main__":
     ma_dir = sys.argv[3]
     workspace = sys.argv[4]
     hub_url = sys.argv[5] if len(sys.argv) > 5 else "http://127.0.0.1:8040"
+    shared = setup_shared_ecosystem(ma_dir, workspace)
+    for r in shared:
+        print(r)
     results = setup_agent_ecosystem(agent_name, agent_cwd, ma_dir, workspace, hub_url)
     for r in results:
         print(r)

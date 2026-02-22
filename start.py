@@ -187,17 +187,28 @@ def ensure_perms(d):
     with open(sf, "w") as f: json.dump(PERMS, f, indent=2)
 
 try:
-    from ecosystem.setup_ecosystem import setup_agent_ecosystem, setup_workspace_claudemd
+    from ecosystem.setup_ecosystem import setup_shared_ecosystem, setup_agent_ecosystem, setup_workspace_claudemd
 
-    # Setup ecosystem for each agent
-    _eco_summary = {"agents": 0, "subagents": 0, "commands": 0, "hooks": 0, "mcp": 0}
+    # Shared ecosystem: copy subagents, commands, skills ONCE to MA_DIR/.claude/
+    _shared_results = setup_shared_ecosystem(MA_DIR, WORKSPACE)
+    _eco_summary = {"agents": 0, "hooks": 0, "mcp": 0}
+    for r in _shared_results:
+        r = r.strip()
+        for key in ("subagents", "commands", "skills"):
+            if r.startswith(f"{key}:"):
+                try:
+                    _eco_summary[key] = int(r.split(":")[1].strip().split()[0])
+                except (ValueError, IndexError):
+                    pass
+
+    # Per-agent: symlink shared content + generate settings.json, .mcp.json
     for a in AGENT_NAMES:
         agent_cwd = os.path.join(MA_DIR, "sessions", a)
         results = setup_agent_ecosystem(a, agent_cwd, MA_DIR, WORKSPACE, HUB_URL, stacks)
         _eco_summary["agents"] += 1
         for r in results:
             r = r.strip()
-            for key in ("subagents", "commands", "hooks", "mcp", "skills"):
+            for key in ("hooks", "mcp"):
                 if r.startswith(f"{key}:"):
                     try:
                         _eco_summary[key] = max(_eco_summary.get(key, 0), int(r.split(":")[1].strip().split()[0]))
@@ -207,9 +218,10 @@ try:
     _parts = []
     if _eco_summary.get("subagents"): _parts.append(f"{_eco_summary['subagents']} subagents")
     if _eco_summary.get("commands"): _parts.append(f"{_eco_summary['commands']} commands")
+    if _eco_summary.get("skills"): _parts.append(f"{_eco_summary['skills']} skills")
     if _eco_summary.get("hooks"): _parts.append(f"{_eco_summary['hooks']} hooks")
     if _eco_summary.get("mcp"): _parts.append(f"{_eco_summary['mcp']} MCP servers")
-    log(f"Ecosystem: {', '.join(_parts)} → {_eco_summary['agents']} agents")
+    log(f"Ecosystem: {', '.join(_parts)} (shared) → {_eco_summary['agents']} agents")
 
     # Generate CLAUDE.md for projects that don't have one
     written = setup_workspace_claudemd(WORKSPACE, MA_DIR)
