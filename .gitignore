@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project runtime
+hub_state.json
+hub_state.json.tmp
+hub_state.json.bak
+hub_state.json.1
+hub_state.json.2
+hub_state.json.3
+*.log
+logs/
+
+# Credentials & secrets
+credentials.env
+*.pem
+*.key
+.env
+.env.local
+
+# Claude CLI local state
+.claude/settings.local.json
+
+# Multiagent runtime state
+.multiagent/

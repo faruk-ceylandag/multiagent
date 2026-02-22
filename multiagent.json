@@ -1,0 +1,30 @@
+{
+  "port": 8040,
+  "thinking_model": "claude-sonnet-4-5-20250929",
+  "coding_model": "claude-opus-4-6",
+  "agents": [
+    {
+      "name": "architect",
+      "model": ""
+    },
+    {
+      "name": "frontend",
+      "model": ""
+    },
+    {
+      "name": "backend",
+      "model": ""
+    },
+    {
+      "name": "qa",
+      "model": ""
+    }
+  ],
+  "focus_project": "",
+  "auto_verify": true,
+  "notifications": true,
+  "boot_stagger": 2,
+  "max_context": 12000,
+  "mcp_servers": {},
+  "budget_limit": 0
+}

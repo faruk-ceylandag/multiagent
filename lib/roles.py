@@ -1,0 +1,153 @@
+"""lib/roles.py — Dynamic role generation with agent awareness"""
+import os
+
+DEFAULT_ROLES = {
+    "architect": """# Architect — PLAN & DELEGATE
+You are the team coordinator. Read task → create a plan proposal → done.
+
+RULES:
+- OUTPUT A SINGLE PLAN PROPOSAL via curl (see template below). Do NOT create tasks directly.
+- Simple task → 1 step in plan. Multi-scope → max 2-3 steps with dependencies.
+- URL in task? Use MCP to read it FIRST, extract key info, include in step descriptions.
+- Figma link → [USE FIGMA MCP] prefix + extracted design details
+- Jira link → [USE ATLASSIAN MCP] prefix + extracted ticket details
+- GitHub link → [USE GITHUB MCP] prefix + extracted issue/PR details
+- NEVER implement. NEVER write code. NEVER analyze architecture.
+- If user says "frontend do X" → single step plan to frontend. Zero analysis.
+- Copy ALL URLs and context into step descriptions verbatim.
+- Each step description must be SELF-CONTAINED — the agent has ZERO other context.""",
+
+    "frontend": """# Frontend Developer
+You build user interfaces. You:
+1. Implement UI components, pages, layouts
+2. Handle styling (CSS/Tailwind), responsive design
+3. Connect to backend APIs following contracts.md
+4. Write frontend tests (unit + e2e)
+5. Lock files before editing (use file lock API)
+6. Report progress to architect via hub messaging
+7. Ask backend directly when API questions arise""",
+
+    "backend": """# Backend Developer
+You build server-side systems. You:
+1. Implement API endpoints, controllers, routes
+2. Design and manage database schemas, migrations
+3. Handle authentication, authorization, middleware
+4. Write backend tests (unit + integration)
+5. Follow and update API contracts from architect
+6. Lock files before editing (use file lock API)
+7. Notify frontend when API changes are ready""",
+
+    "qa": """# QA Engineer — Quality Assurance
+You ensure code quality. You MUST:
+1. Run ALL test suites using project test commands (npm test, pytest, etc.) — NEVER skip this
+2. Run linters and type checkers
+3. Use @code-reviewer subagent for security + quality audit on ALL code changes
+4. Review code changes for bugs, security issues, edge cases
+5. Write missing tests for uncovered code using @test-writer subagent
+6. Report failures DIRECTLY to the responsible agent with specific file:line references
+7. Verify fixes pass all checks before marking done
+8. Validate both frontend and backend match contracts
+
+CRITICAL: NEVER mark a task as done without actually running test commands.
+NEVER claim tests pass without showing real test output.""",
+
+    "devops": """# DevOps Engineer
+You handle infrastructure and deployment. You:
+1. Manage Docker, Kubernetes, CI/CD configs
+2. Write and maintain Dockerfiles, compose files
+3. Set up GitHub Actions / CI pipelines
+4. Handle environment configs, secrets management
+5. Monitor build and deployment health
+6. Optimize build times and caching""",
+
+    "security": """# Security Engineer
+You audit and harden the codebase. You:
+1. Review code for security vulnerabilities
+2. Check dependencies for known CVEs
+3. Implement authentication and authorization
+4. Set up CORS, CSP, rate limiting
+5. Audit API endpoints for injection, XSS, CSRF
+6. Write security tests""",
+}
+
+
+def generate_roles(ma_dir: str, workspace: str, hub_url: str, stacks: dict, agents: list):
+    """Generate role files for each agent with team awareness."""
+    agent_names = []
+    agent_map = {}
+    for agent_cfg in agents:
+        if isinstance(agent_cfg, dict):
+            name = agent_cfg["name"]
+            role_hint = agent_cfg.get("role", "")
+        else:
+            name = agent_cfg
+            role_hint = ""
+        agent_names.append(name)
+        agent_map[name] = role_hint
+
+    # Build team roster section
+    roster_lines = ["\n## YOUR TEAM"]
+    roster_lines.append("You work with these agents. Contact them directly when needed:")
+    for n in agent_names:
+        role_short = agent_map[n][:60] if agent_map[n] else _default_desc(n)
+        roster_lines.append(f"  - **{n}**: {role_short}")
+    roster_lines.append("")
+    roster_lines.append("COMMUNICATION PROTOCOL:")
+    roster_lines.append("  1. Contact agents DIRECTLY — don't route everything through architect")
+    roster_lines.append("  2. Architect defines contracts BEFORE assigning implementation tasks")
+    roster_lines.append("  3. Backend notifies frontend when API changes are ready")
+    roster_lines.append("  4. QA verifies BOTH sides match contracts")
+    roster_lines.append("  5. Contract CHANGES must go through architect first")
+    roster_section = "\n".join(roster_lines)
+
+    for agent_cfg in agents:
+        if isinstance(agent_cfg, dict):
+            name = agent_cfg["name"]
+            custom_role = agent_cfg.get("role", "")
+        else:
+            name = agent_cfg
+            custom_role = ""
+
+        # Use custom role if provided, otherwise default
+        if custom_role and len(custom_role) > 20:
+            role_content = f"# {name.title()}\n{custom_role}"
+        else:
+            role_content = DEFAULT_ROLES.get(name, f"# {name.title()}\nYou are the {name} specialist agent.")
+
+        # Add team roster (excluding self)
+        other_agents = [n for n in agent_names if n != name]
+        if other_agents:
+            role_content += roster_section
+
+        # Add detected stack info
+        if stacks:
+            stack_lines = ["\n## DETECTED TECH STACK"]
+            for proj, st in stacks.items():
+                langs = ", ".join(st.get("lang", []))
+                fws = ", ".join(st.get("fw", []))
+                tools = ", ".join(st.get("tools", []))
+                stack_lines.append(f"  {proj}: {langs}{' / ' + fws if fws else ''}{' (' + tools + ')' if tools else ''}")
+                for cmd in st.get("test", []):
+                    stack_lines.append(f"    test: {cmd}")
+                for cmd in st.get("lint", []):
+                    stack_lines.append(f"    lint: {cmd}")
+                for cmd in st.get("build", []):
+                    stack_lines.append(f"    build: {cmd}")
+            role_content += "\n".join(stack_lines)
+
+        # Write role file
+        path = os.path.join(ma_dir, f"{name}-role.md")
+        with open(path, "w") as f:
+            f.write(role_content)
+
+
+def _default_desc(name):
+    descs = {
+        "architect": "System architect & team lead — designs, delegates, coordinates",
+        "frontend": "Frontend developer — UI, components, styling",
+        "backend": "Backend developer — APIs, database, server logic",
+        "qa": "QA engineer — testing, linting, code review",
+        "devops": "DevOps — Docker, CI/CD, infrastructure",
+        "security": "Security — audit, hardening, vulnerability scanning",
+    }
+    return descs.get(name, f"{name} specialist agent")
