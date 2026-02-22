@@ -18,7 +18,7 @@ from .context import AgentContext
 from .log_utils import log, start_log_thread, flush_logs
 from .hub_client import (hub_post, hub_get, hub_msg, set_status,
                          update_session, update_task_status, report_progress,
-                         get_agent_roster)
+                         get_agent_roster, is_degraded)
 from .credentials import load_credentials, save_credential, check_missing_credentials
 from .git_ops import (git_stash_save, git_rollback, git_branch, git_commit,
                       git_changed_files, collect_changes, create_github_pr,
@@ -346,6 +346,12 @@ while True:
         time.sleep(poll_interval + random.uniform(0, 1))
         poll_resp = hub_post(ctx, f"/poll/{ctx.AGENT_NAME}", {}, timeout=5)
         if not poll_resp:
+            if is_degraded():
+                log(ctx, "⛔ Hub unreachable — shutting down")
+                set_status(ctx, "offline", "hub_down")
+                unlock_all(ctx)
+                flush_logs(ctx)
+                sys.exit(1)
             continue
 
         if poll_resp.get("stop"):

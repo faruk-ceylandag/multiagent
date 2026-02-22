@@ -10,6 +10,8 @@ let mergedMode = false, _inboxAgent = '';
 let _prevTaskStatuses = {};
 let _ws = null, _wsRetries = 0, _wsMaxRetries = 10, _wsConnected = false;
 let _httpPollTimer = null;
+const _isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+const _mod = _isMac ? '⌘' : 'Ctrl';
 
 // ══════════════════════════════════
 //  TOAST NOTIFICATIONS
@@ -1755,7 +1757,7 @@ function _updateSlashHint(text) {
   ).join('');
 }
 
-// ── Expanded Editor (Ctrl+O) ──
+// ── Expanded Editor (${_mod}+O) ──
 function openEditor() {
   const ci = $('cmdInput');
   const overlay = document.createElement('div');
@@ -1764,7 +1766,7 @@ function openEditor() {
   overlay.innerHTML = `<div class="editor-modal-box">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <span style="font-size:13px;font-weight:600">Expanded Editor</span>
-      <span style="font-size:11px;color:var(--fg3)">Ctrl+Enter to send · Esc to cancel</span>
+      <span style="font-size:11px;color:var(--fg3)">${_mod}+Enter to send · Esc to cancel</span>
     </div>
     <textarea id="editorArea" placeholder="Type your prompt...">${ci ? esc(ci.value) : ''}</textarea>
     <div class="editor-footer">
@@ -1804,8 +1806,32 @@ function closeEditor(apply, send) {
 
 // ── Help ──
 function showHelp(){
-  const lines=Object.entries(_slashCommands).map(([k,v])=>`<b>${k}</b>${v.args?' '+v.args:''} — ${v.desc}`);
-  toast(lines.join('<br>'),'info',8000);
+  const cmdRows=Object.entries(_slashCommands).map(([k,v])=>
+    `<tr><td style="white-space:nowrap;font-weight:600;color:var(--accent);padding:2px 12px 2px 0">${esc(k)}${v.args?' '+esc(v.args):''}</td><td style="color:var(--fg2);padding:2px 0">${esc(v.desc)}</td></tr>`
+  ).join('');
+  const shortcuts=[
+    [`${_mod}+C`,'Stop selected agent'],
+    [`${_mod}+Enter`,'Send (in expanded editor)'],
+    ['Esc','Close modal / editor'],
+    ['?','Show this help'],
+  ];
+  const keyRows=shortcuts.map(([k,d])=>
+    `<tr><td style="white-space:nowrap;padding:2px 12px 2px 0"><kbd style="background:var(--bg1);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:11px">${k}</kbd></td><td style="color:var(--fg2);padding:2px 0">${d}</td></tr>`
+  ).join('');
+  const overlay=document.createElement('div');
+  overlay.className='modal-overlay';
+  overlay.innerHTML=`<div class="modal-box" style="min-width:340px;max-width:480px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <span style="font-size:14px;font-weight:600">Help</span>
+      <button onclick="this.closest('.modal-overlay').remove()" style="background:none;border:none;color:var(--fg3);cursor:pointer;font-size:16px">×</button>
+    </div>
+    <div style="font-size:11px;font-weight:600;color:var(--fg3);text-transform:uppercase;margin-bottom:6px">Keyboard Shortcuts</div>
+    <table style="font-size:12px;margin-bottom:14px;width:100%">${keyRows}</table>
+    <div style="font-size:11px;font-weight:600;color:var(--fg3);text-transform:uppercase;margin-bottom:6px">Slash Commands</div>
+    <table style="font-size:12px;width:100%">${cmdRows}</table>
+  </div>`;
+  overlay.addEventListener('click',e=>{if(e.target===overlay)overlay.remove();});
+  document.body.appendChild(overlay);
 }
 
 // ── Slash Commands ──
@@ -2143,3 +2169,12 @@ if(ci){
   });
   setTimeout(()=>ci.focus(),100);
 }
+
+// ── Global keyboard shortcuts ──
+document.addEventListener('keydown',e=>{
+  // Cmd+C / Ctrl+C (no text selected) → stop selected agent
+  if(e.key==='c'&&(e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey){
+    const selection=window.getSelection().toString();
+    if(!selection&&sel){e.preventDefault();stopAgent(sel);}
+  }
+});
