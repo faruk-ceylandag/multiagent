@@ -872,6 +872,29 @@ def _review_timeout_timer():
                         except (ValueError, TypeError):
                             pass
 
+            # Plan-pending timeout: auto-dismiss plans pending > 30 minutes
+            for pid, plan in dict(pending_plans).items():
+                if plan.get("status") != "pending":
+                    continue
+                created = plan.get("created", "")
+                if not created:
+                    continue
+                try:
+                    created_time = datetime.fromisoformat(created)
+                    if (now - created_time).total_seconds() > 1800:  # 30 min
+                        pending_plans[pid]["status"] = "dismissed"
+                        parent_tid = plan.get("task_id", "")
+                        if parent_tid and str(parent_tid).isdigit():
+                            ptid = int(parent_tid)
+                            if ptid in tasks and tasks[ptid].get("status") == "in_progress":
+                                tasks[ptid]["status"] = "to_do"
+                                tasks[ptid].pop("assigned_to", None)
+                        add_activity("system", plan.get("created_by", "?"), "plan_timeout",
+                                     f"Plan #{pid} auto-dismissed (30 min timeout)")
+                        bump_version()
+                except (ValueError, TypeError):
+                    pass
+
 def _lock_cleanup_timer():
     while not _shutdown_event.is_set():
         _shutdown_event.wait(120)

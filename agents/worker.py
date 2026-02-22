@@ -1193,12 +1193,12 @@ RULES:
                 task_title = re.sub(r'^#\d+\s*', '', task_title)
                 task_title = re.sub(r'https?://\S+\s*', '', task_title).strip()
                 task_title = task_title[:80]
-                # Build: TASK-ID | title or branch-ref | title
-                if ctx.current_task_id:
-                    suggested_msg = f"TASK-{ctx.current_task_id} | {task_title}"
-                elif cur_br and cur_br.startswith("feature/"):
+                # Build: branch-ref | title (preferred) or TASK-ID | title
+                if cur_br and cur_br.startswith("feature/"):
                     task_ref = cur_br.replace("feature/", "")
                     suggested_msg = f"{task_ref} | {task_title}"
+                elif ctx.current_task_id:
+                    suggested_msg = f"TASK-{ctx.current_task_id} | {task_title}"
                 else:
                     suggested_msg = f"{ctx.AGENT_NAME} | {task_title}"
                 log(ctx, f"📋 Changes staged for review ({ctx.current_project})")

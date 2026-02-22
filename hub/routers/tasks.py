@@ -156,6 +156,7 @@ def update_task(tid: int, data: dict):
             _dispatch_code_review(tid)
         elif new_status == "done" and old_status != "done":
             _auto_notify_dependents(tid)
+            _check_plan_parent_completion(tid)
         elif new_status == "failed" and old_status != "failed":
             _auto_notify_blocker(tid)
             _maybe_create_rework_cycle(tid)
@@ -194,6 +195,22 @@ def _auto_notify_dependents(completed_tid):
         })
         add_activity("system", target_agent, "task_unblocked",
                      f"Task #{t['id']} unblocked (dep #{completed_tid} done)")
+
+
+def _check_plan_parent_completion(completed_tid):
+    """When a plan subtask completes, check if all siblings are done → mark parent done."""
+    for t in tasks.values():
+        subtask_ids = t.get("_plan_subtask_ids")
+        if not subtask_ids or completed_tid not in subtask_ids:
+            continue
+        # Check if ALL plan subtasks are done
+        if all(tasks.get(sid, {}).get("status") == "done" for sid in subtask_ids):
+            t["status"] = "done"
+            t["completed_at"] = datetime.now().isoformat()
+            add_activity("system", t.get("assigned_to", "?"), "task_update",
+                         f"Task #{t['id']} auto-completed (all plan subtasks done)")
+            bump_version()
+        break  # A subtask belongs to at most one parent
 
 
 def _auto_notify_blocker(failed_tid):
@@ -1052,13 +1069,13 @@ def approve_plan(data: dict):
                     "timestamp": ts,
                 })
 
-        # Mark the architect's parent task as done — planning is complete
+        # Store subtask link — parent completes when all subtasks are done
         parent_tid = plan.get("task_id", "")
         if parent_tid and str(parent_tid).isdigit():
             ptid = int(parent_tid)
             if ptid in tasks:
-                tasks[ptid]["status"] = "done"
-                tasks[ptid]["completed_at"] = ts
+                tasks[ptid]["_plan_subtask_ids"] = [ct["task_id"] for ct in created_tasks]
+                tasks[ptid]["_plan_id"] = plan_id
 
         bump_version()
         save_state()
