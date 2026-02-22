@@ -65,8 +65,11 @@ def load_config(workspace: str) -> dict:
                         if isinstance(a, str):
                             agents.append({"name": a, "role": "", "model": ""})
                         elif isinstance(a, dict):
-                            agents.append({"name": a.get("name","agent"), "role": a.get("role",""),
-                                          "model": a.get("model","")})
+                            entry = {"name": a.get("name","agent"), "role": a.get("role",""),
+                                     "model": a.get("model","")}
+                            if a.get("hidden"):
+                                entry["hidden"] = True
+                            agents.append(entry)
                     cfg["agents"] = agents
             except Exception as e:
                 import logging

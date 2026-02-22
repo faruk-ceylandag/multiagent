@@ -15,6 +15,19 @@ cfg = load_config(WORKSPACE)
 HUB_PORT = cfg.get("port", 8040)
 HUB_URL = f"http://127.0.0.1:{HUB_PORT}"
 AGENTS = cfg.get("agents", [])
+
+# ── Auto-inject hidden reviewer agents (required for code review pipeline) ──
+_REVIEWER_AGENTS = [
+    {"name": "reviewer-logic", "role": "code reviewer — logic & correctness", "model": "haiku", "hidden": True},
+    {"name": "reviewer-style", "role": "code reviewer — style & readability", "model": "haiku", "hidden": True},
+    {"name": "reviewer-arch", "role": "code reviewer — architecture & design", "model": "haiku", "hidden": True},
+]
+_existing_names = {a["name"] if isinstance(a, dict) else a for a in AGENTS}
+for ra in _REVIEWER_AGENTS:
+    if ra["name"] not in _existing_names:
+        AGENTS.append(ra)
+cfg["agents"] = AGENTS
+
 AGENT_NAMES = [a["name"] if isinstance(a, dict) else a for a in AGENTS]
 MA_DIR = os.path.join(WORKSPACE, ".multiagent")
 
@@ -38,7 +51,9 @@ print(f"""
 if not shutil.which("claude"): err("claude CLI not found — install: npm i -g @anthropic-ai/claude-code")
 if not os.path.isdir(WORKSPACE): err(f"Not found: {WORKSPACE}")
 log(f"Workspace: {WORKSPACE}")
-log(f"Agents: {', '.join(AGENT_NAMES)} ({len(AGENT_NAMES)} total)")
+_visible = [a["name"] if isinstance(a, dict) else a for a in AGENTS if not (isinstance(a, dict) and a.get("hidden"))]
+_hidden = [a["name"] if isinstance(a, dict) else a for a in AGENTS if isinstance(a, dict) and a.get("hidden")]
+log(f"Agents: {', '.join(_visible)} ({len(_visible)} visible" + (f", +{len(_hidden)} hidden reviewers)" if _hidden else ")"))
 _tm = cfg.get("thinking_model", "claude-sonnet-4-5-20250929")
 _cm = cfg.get("coding_model", "claude-opus-4-6")
 _ts = _tm.split("-")[1] if "-" in _tm else _tm

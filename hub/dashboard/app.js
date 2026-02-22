@@ -1154,6 +1154,27 @@ function renderInbox(p){
         if(m.sender==='user'){
           return`<div class="chat-bubble chat-bubble-user">${displayContent}${isLong?`<span class="bubble-collapsed" data-full="${fullContent.replace(/"/g,'&quot;')}">… <button class="bubble-toggle" onclick="expandBubble(this)">Show more</button></span>`:''}<div class="bubble-meta">you · ${timeStr}</div></div>`;
         }
+        if(m.msg_type==='plan_proposal'){
+          const planId=m.plan_id;
+          const steps=m.plan_steps||[];
+          const stepsHtml=steps.map((s,i)=>{
+            const dep=s.depends_on_step!=null?` <span style="opacity:0.5;font-size:10px">(after step ${Number(s.depends_on_step)+1})</span>`:'';
+            const assignee=s.assigned_to?` → <strong>${esc(s.assigned_to)}</strong>`:'';
+            return`<div class="plan-step" data-step="${i}"><label><input type="checkbox" checked data-plan="${planId}" data-idx="${i}" onchange="togglePlanStep(this)"> <strong>${i+1}.</strong> ${esc(s.description.substring(0,200))}${assignee}${dep}</label></div>`;
+          }).join('');
+          return`<div class="chat-bubble chat-bubble-agent plan-proposal-bubble">
+            <span class="bubble-type" style="background:var(--ac);color:#fff">plan</span>
+            <div style="margin:4px 0 6px">${displayContent}</div>
+            ${steps.length?`<div class="plan-steps">
+              <label class="plan-select-all" style="margin-bottom:4px;font-size:10px"><input type="checkbox" checked onchange="toggleAllPlanSteps(this,${planId})"> Select all</label>
+              ${stepsHtml}
+            </div>
+            <div style="margin-top:8px;display:flex;gap:6px">
+              <button class="btn-sm" style="background:var(--green);color:#000" onclick="approvePlan(${planId})">Approve Selected</button>
+              <button class="btn-sm btn-ghost" onclick="dismissPlan(${planId})">Dismiss</button>
+            </div>`:''}
+            <div class="bubble-meta">${m.sender||'architect'} · ${timeStr}</div></div>`;
+        }
         if(m.msg_type==='review_request'){
           const proj=m.project||'';const branch=m.branch||'';const suggested=m.suggested_commit_msg||'';
           const commitId=`commit_${(proj+branch).replace(/\W/g,'_')}`;
@@ -2002,6 +2023,48 @@ async function discardChanges(project){
     const r=await(await fetch(HUB+'/git/rollback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project,mode:'discard'})})).json();
     if(r.status==='ok'){toast('↩ Changes discarded: '+project,'info',3000);fetchChanges();fetchInbox();poll();}
     else toast('Error: '+r.message,'error');
+  }catch(e){toast('Error: '+e,'error');}
+}
+
+// ── Plan Proposal Actions ──
+function togglePlanStep(cb){
+  const step=cb.closest('.plan-step');
+  if(step) step.classList.toggle('plan-step-unchecked',!cb.checked);
+}
+function toggleAllPlanSteps(masterCb,planId){
+  const bubble=masterCb.closest('.plan-proposal-bubble');
+  if(!bubble)return;
+  bubble.querySelectorAll(`input[data-plan="${planId}"]`).forEach(cb=>{
+    cb.checked=masterCb.checked;
+    togglePlanStep(cb);
+  });
+}
+async function approvePlan(planId){
+  const bubble=document.querySelector(`.plan-proposal-bubble input[data-plan="${planId}"]`)?.closest('.plan-proposal-bubble');
+  if(!bubble){toast('Plan bubble not found','error');return;}
+  const selected=[];
+  bubble.querySelectorAll(`input[data-plan="${planId}"]:checked`).forEach(cb=>selected.push(Number(cb.dataset.idx)));
+  if(!selected.length){toast('Select at least one step','warn');return;}
+  try{
+    const r=await(await fetch(HUB+'/plan/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan_id:planId,selected_steps:selected})})).json();
+    if(r.status==='ok'){
+      toast(`Plan #${planId} approved — ${r.tasks_created.length} task(s) created`,'success',4000);
+      bubble.querySelectorAll('button').forEach(b=>b.disabled=true);
+      bubble.style.opacity='0.5';
+      setTimeout(()=>{poll();fetchInbox();},500);
+    } else toast('Error: '+(r.message||'unknown'),'error');
+  }catch(e){toast('Error: '+e,'error');}
+}
+async function dismissPlan(planId){
+  if(!confirm('Dismiss this plan?'))return;
+  try{
+    const r=await(await fetch(HUB+'/plan/dismiss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan_id:planId})})).json();
+    if(r.status==='ok'){
+      toast(`Plan #${planId} dismissed`,'info',3000);
+      const bubble=document.querySelector(`.plan-proposal-bubble input[data-plan="${planId}"]`)?.closest('.plan-proposal-bubble');
+      if(bubble){bubble.querySelectorAll('button').forEach(b=>b.disabled=true);bubble.style.opacity='0.5';}
+      setTimeout(fetchInbox,500);
+    } else toast('Error: '+(r.message||'unknown'),'error');
   }catch(e){toast('Error: '+e,'error');}
 }
 
