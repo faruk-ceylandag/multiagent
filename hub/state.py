@@ -542,6 +542,50 @@ def load_state():
     except Exception as e:
         logger.warning(f"load: {e}")
 
+
+def reset_session():
+    """Reset volatile state for a fresh session. Keeps patterns, learnings, and completed task data."""
+    with lock:
+        # Clear agents — they re-register on boot
+        agents.clear()
+        # Reset in_progress/code_review tasks to to_do (agent is gone)
+        for tid, task in tasks.items():
+            if task.get("status") in ("in_progress", "code_review"):
+                task["status"] = "to_do"
+                task.pop("assigned_to", None)
+                task.pop("review_dispatched_at", None)
+        # Dismiss stale pending plans
+        for pid, plan in pending_plans.items():
+            if plan.get("status") == "pending":
+                plan["status"] = "dismissed"
+        # Clear volatile state
+        messages.clear()
+        analytics_log.clear()
+        activity.clear()
+        changes.clear()
+        file_locks.clear()
+        file_plans.clear()
+        stop_signals.clear()
+        agent_progress.clear()
+        sessions.clear()
+        # Clear log buffers (old session logs)
+        for name in log_buffers:
+            log_buffers[name].clear()
+            log_counters[name] = 0
+        # Truncate log files on disk
+        if LOG_DIR:
+            for name in ALL_AGENTS:
+                lf = _log_file(name)
+                if lf and os.path.exists(lf):
+                    try:
+                        open(lf, "w").close()
+                    except OSError:
+                        pass
+        bump_version()
+        save_state()
+        logger.info("Session reset: cleared agents, logs, messages; reset stale tasks to to_do")
+
+
 # ── Config Hot-Reload ──
 _cfg_mtime = 0
 

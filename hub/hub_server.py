@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 asyncio.get_event_loop().set_default_executor(ThreadPoolExecutor(max_workers=200))
 
 # Initialize shared state (loads config, state, starts background threads)
-from hub.state import load_state, start_background_threads, MA_DIR
+from hub.state import load_state, reset_session, start_background_threads, MA_DIR
 
 # Import all routers
 from hub.routers import all_routers
@@ -55,8 +55,9 @@ app.add_middleware(MetricsMiddleware)
 for router in all_routers:
     app.include_router(router)
 
-# ── Load persisted state ──
+# ── Load persisted state & reset session ──
 load_state()
+reset_session()
 
 # ── Start background threads ──
 start_background_threads()
