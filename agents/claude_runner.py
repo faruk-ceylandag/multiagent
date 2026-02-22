@@ -85,10 +85,13 @@ def _score_complexity(prompt):
 
 def classify_prompt(prompt, role=""):
     """Classify prompt into model tier: opus/sonnet/haiku.
-    Role-aware: architect always sonnet, system notifications capped at sonnet."""
+    Role-aware: architect always sonnet, reviewers always haiku, system notifications capped at sonnet."""
     # Architect only delegates — never needs opus
     if role == "architect":
         return "sonnet"
+    # Reviewers always use haiku — simple approve/reject tasks
+    if role and role.startswith("reviewer"):
+        return "haiku"
 
     score = _score_complexity(prompt)
     if score <= 5:
@@ -203,9 +206,8 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
 
             cmd = ["claude"]
             if ctx.AGENT_NAME == "architect":
-                # Architect can ONLY: curl (to create tasks via hub API) + MCP tools (to read tickets/designs)
-                # NO codebase access (Read, Bash ls/cat/grep/find) — forces delegation
-                cmd.extend(["--allowedTools", "Bash(curl*),mcp__*"])
+                # Architect can read codebase (for better plans) but NOT write code
+                cmd.extend(["--allowedTools", "Read,Glob,Grep,Bash(curl*),mcp__*,WebFetch,WebSearch,Task"])
             else:
                 cmd.extend(["--allowedTools", "Edit,Write,Read,Bash(*),mcp__*"])
             cmd.extend(["--output-format", "stream-json", "--verbose"])

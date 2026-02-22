@@ -34,6 +34,52 @@ from .learning import (read_file, load_skills, run_hook, load_template,
 from .hub_client import get_relevant_patterns, get_peer_learnings
 
 
+def _parse_review_verdict(ctx):
+    """Parse VERDICT: approve/request_changes from reviewer's output."""
+    lines = ctx._last_output_lines[-30:]  # Check last 30 lines
+    verdict = None
+    comments = []
+
+    # Look for VERDICT: line
+    for line in reversed(lines):
+        low = line.lower().strip()
+        if low.startswith("verdict:"):
+            v = low.split(":", 1)[1].strip()
+            if "approve" in v:
+                verdict = "approve"
+            elif "request" in v or "change" in v:
+                verdict = "request_changes"
+            break
+
+    # Parse COMMENTS section if request_changes
+    if verdict == "request_changes":
+        in_comments = False
+        for line in lines:
+            if line.strip().upper().startswith("COMMENTS"):
+                in_comments = True
+                continue
+            if in_comments and line.strip().startswith("- "):
+                parts = line.strip()[2:].split("|")
+                if len(parts) >= 3:
+                    file_part = parts[0].strip()
+                    line_num = 0
+                    if ":" in file_part:
+                        try:
+                            line_num = int(file_part.split(":")[-1])
+                        except (ValueError, IndexError):
+                            pass
+                    comments.append({
+                        "file": file_part.split(":")[0],
+                        "line": line_num,
+                        "severity": parts[1].strip(),
+                        "text": parts[2].strip(),
+                    })
+                else:
+                    comments.append({"file": "", "line": 0, "severity": "warning", "text": line.strip()[2:]})
+
+    return verdict, comments
+
+
 def _build_patterns_block(patterns, peer_learnings, max_chars=600):
     """Build a concise context block from patterns and peer learnings."""
     parts = []
@@ -564,6 +610,7 @@ while True:
 
         ctx.current_task_id = None
         ctx.current_project = None
+        ctx._review_parent_id = None
         # Architect/QA/reviewers: fresh session each task (independent tasks, no carry-over)
         # Dev agents: keep session for multi-call conversation continuity
         _fresh_session_roles = {"architect", "qa", "reviewer-logic", "reviewer-style", "reviewer-arch"}
@@ -583,8 +630,19 @@ while True:
                 ctx.current_task_id = tid_match.group(1)
                 break
 
-        # Auto-create kanban task
-        if is_task and not ctx.current_task_id:
+        # Detect review parent ID from message or task data
+        for m in msgs:
+            if m.get("_review_parent_id"):
+                ctx._review_parent_id = str(m["_review_parent_id"])
+                break
+        if not ctx._review_parent_id and ctx.current_task_id:
+            _td = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
+            if _td and isinstance(_td, dict) and _td.get("_review_parent_id"):
+                ctx._review_parent_id = str(_td["_review_parent_id"])
+
+        # Auto-create kanban task (skip for reviewer agents with a review subtask)
+        _is_reviewer = ctx.AGENT_NAME.startswith("reviewer-")
+        if is_task and not ctx.current_task_id and not (_is_reviewer and ctx._review_parent_id):
             desc = next((m["content"] for m in msgs if m.get("sender") in ("user", "system")
                          and m.get("msg_type") in ("task", "message")), "")
             if desc and len(desc) > 10:
@@ -600,12 +658,15 @@ while True:
                     ctx.current_task_id = str(result["id"])
                     log(ctx, f"📌 Task #{ctx.current_task_id} created in kanban")
 
-        # Reviewer/QA agents must NOT change the original task's status —
+        # Reviewer/QA agents must NOT change the original (parent) task's status —
         # they submit verdicts via /tasks/{tid}/review or set status via curl.
-        # Only dev agents (and architect for auto-created tasks) transition to in_progress.
+        # Reviewers DO set their own subtask to in_progress.
         _REVIEWER_QA_NAMES = {"reviewer-logic", "reviewer-style", "reviewer-arch", "qa"}
         _is_reviewer_or_qa = ctx.AGENT_NAME in _REVIEWER_QA_NAMES
         if ctx.current_task_id and not _is_reviewer_or_qa:
+            update_task_status(ctx, ctx.current_task_id, "in_progress")
+        elif ctx.current_task_id and ctx.AGENT_NAME.startswith("reviewer-") and ctx._review_parent_id:
+            # Reviewer: set own subtask to in_progress (not the parent)
             update_task_status(ctx, ctx.current_task_id, "in_progress")
         ctx.reset_eco_tracking()
         _refresh_ecosystem(ctx)
@@ -1247,7 +1308,38 @@ RULES:
             # they submit verdicts via POST /tasks/{tid}/review or set status via curl.
             # The hub manages the task lifecycle for reviewed/tested tasks.
             if _is_reviewer_or_qa:
-                log(ctx, f"ℹ {ctx.AGENT_NAME}: review/QA complete, verdict submitted (not changing task status)")
+                if ctx.AGENT_NAME.startswith("reviewer-"):
+                    # Parse verdict from Claude's output and auto-submit
+                    verdict, comments = _parse_review_verdict(ctx)
+                    # Submit to parent task (not the reviewer's own subtask)
+                    _review_target = ctx._review_parent_id or ctx.current_task_id
+                    if verdict:
+                        hub_post(ctx, f"/tasks/{_review_target}/review", {
+                            "agent": ctx.AGENT_NAME,
+                            "verdict": verdict,
+                            "comments": comments,
+                        })
+                        log(ctx, f"📝 Auto-submitted review verdict: {verdict} ({len(comments)} comments) → parent #{_review_target}")
+                    else:
+                        # Fallback: approve if no clear verdict found
+                        hub_post(ctx, f"/tasks/{_review_target}/review", {
+                            "agent": ctx.AGENT_NAME,
+                            "verdict": "approve",
+                            "comments": [],
+                        })
+                        log(ctx, f"📝 No clear verdict found — auto-approved → parent #{_review_target}")
+                    # Mark own subtask as done (if it's a review subtask)
+                    if ctx._review_parent_id and ctx.current_task_id != ctx._review_parent_id:
+                        _sub_status = "done" if (verdict == "approve" or not verdict) else "failed"
+                        update_task_status(ctx, ctx.current_task_id, _sub_status)
+                elif ctx.AGENT_NAME == "qa" or any(h in ctx.AGENT_NAME.lower() for h in ("qa", "test", "quality")):
+                    # QA agent: parse pass/fail from output, update task status
+                    _final_status = "uat" if task_ok else "failed"
+                    update_task_status(ctx, ctx.current_task_id, _final_status,
+                                       detail="" if task_ok else "QA tests failed")
+                    log(ctx, f"📝 QA result: {'pass → uat' if task_ok else 'fail'}")
+                else:
+                    log(ctx, f"ℹ {ctx.AGENT_NAME}: review/QA complete (not changing task status)")
             else:
                 # Dev agents go to code_review, architect goes to done
                 _SKIP_REVIEW_ROLES = {"architect"}

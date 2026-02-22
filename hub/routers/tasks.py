@@ -123,6 +123,20 @@ def update_task(tid: int, data: dict):
         if new_deps is not None:
             if _has_dependency_cycle(tid, new_deps, tasks):
                 return {"status": "error", "message": "Circular dependency detected"}
+
+        # Intercept QA failure: in_testing → failed → redirect to in_progress (same task rework)
+        if old_status == "in_testing" and new_status == "failed":
+            detail = data.get("detail", "")
+            if _handle_qa_failure(tid, old_status, detail=detail):
+                # Task was redirected to in_progress — apply non-status fields from data
+                non_status = {k: v for k, v in data.items() if k != "status"}
+                if non_status:
+                    tasks[tid].update(non_status)
+                add_activity("system", tasks[tid].get("assigned_to", "?"), "task_update",
+                             f"Task #{tid}: {old_status} → in_progress (QA rework)")
+                save_state()
+                return {"status": "ok"}
+
         tasks[tid].update(data)
         new_status = tasks[tid].get("status", "")
         if new_status == "in_progress" and not tasks[tid].get("started_at"):
@@ -151,6 +165,14 @@ def update_task(tid: int, data: dict):
             add_audit(tasks[tid].get("assigned_to", "system"), "task_update",
                       {"task_id": tid, "old_status": old_status, "new_status": new_status})
 
+        # Cancel active review subtasks when parent is cancelled/failed
+        if new_status in ("cancelled", "failed") and old_status != new_status:
+            for sub_id in tasks[tid].get("_review_subtask_ids", []):
+                sub = tasks.get(sub_id)
+                if sub and sub.get("status") not in ("done", "failed", "cancelled"):
+                    sub["status"] = "cancelled"
+                    sub["completed_at"] = datetime.now().isoformat()
+
         # ── Auto-notification: only on actual status transitions ──
         if new_status == "code_review" and old_status != "code_review":
             _dispatch_code_review(tid)
@@ -159,7 +181,6 @@ def update_task(tid: int, data: dict):
             _check_plan_parent_completion(tid)
         elif new_status == "failed" and old_status != "failed":
             _auto_notify_blocker(tid)
-            _maybe_create_rework_cycle(tid)
 
         save_state()
     return {"status": "ok"}
@@ -248,7 +269,7 @@ def _auto_notify_blocker(failed_tid):
 
 
 def _dispatch_code_review(tid):
-    """Dispatch code review to 3 hidden reviewer agents (logic, style, architecture)."""
+    """Dispatch code review by creating 3 reviewer subtasks (persistent, tracked)."""
     task = tasks.get(tid, {})
     if not task:
         return
@@ -278,6 +299,14 @@ def _dispatch_code_review(tid):
         bump_version()
         return
 
+    # Cancel old review subtasks from previous rework cycles
+    old_subtask_ids = task.get("_review_subtask_ids", [])
+    for old_sid in old_subtask_ids:
+        old_sub = tasks.get(old_sid)
+        if old_sub and old_sub.get("status") not in ("done", "failed", "cancelled"):
+            old_sub["status"] = "cancelled"
+            old_sub["completed_at"] = datetime.now().isoformat()
+
     # Clear previous reviews for re-review
     task_reviews[tid_str] = {}
     task["review_dispatched_at"] = datetime.now().isoformat()
@@ -288,34 +317,79 @@ def _dispatch_code_review(tid):
     author = task.get("assigned_to", "")
     ts = datetime.now().isoformat()
 
+    # Collect git diff so reviewers can see actual code changes
+    diff_text = ""
+    if project and branch:
+        from hub.state import git_cmd, safe_project_dir
+        proj_dir = safe_project_dir(project)
+        if proj_dir:
+            base = "main"
+            _, raw_diff = git_cmd(["diff", f"{base}...{branch}", "--stat"], cwd=proj_dir)
+            _, detailed = git_cmd(["diff", f"{base}...{branch}"], cwd=proj_dir)
+            if detailed:
+                diff_text = f"\n\nDIFF SUMMARY:\n{raw_diff}\n\nFULL DIFF:\n{detailed[:8000]}"
+            else:
+                # Branch might not exist yet or no diff — try uncommitted
+                _, raw_diff = git_cmd(["diff", "--stat"], cwd=proj_dir)
+                _, detailed = git_cmd(["diff"], cwd=proj_dir)
+                if detailed:
+                    diff_text = f"\n\nUNCOMMITTED CHANGES:\n{raw_diff}\n\nFULL DIFF:\n{detailed[:8000]}"
+
     specializations = {
         "reviewer-logic": "LOGIC correctness: algorithm bugs, edge cases, null handling, race conditions, error propagation",
         "reviewer-style": "CODE STYLE: naming, formatting, readability, DRY, function length, comment quality",
         "reviewer-arch": "ARCHITECTURE: design patterns, separation of concerns, SOLID, scalability, coupling",
     }
 
+    # Create 3 reviewer subtasks
+    subtask_ids = []
     for r in reviewers:
-        review_msg = (
+        sub_tid = max(tasks.keys(), default=0) + 1
+        review_desc = (
             f"CODE REVIEW REQUEST — Task #{tid}\n"
             f"Author: {author} | Project: {project} | Branch: {branch}\n"
             f"Your focus: {specializations[r]}\n\n"
-            f"Task description:\n{desc}\n\n"
-            f"Review the code changes and respond by calling:\n"
-            f"curl -s -X POST $HUB/tasks/{tid}/review -H 'Content-Type: application/json' "
-            f"-d '{{\"agent\": \"{r}\", \"verdict\": \"approve\"}}'\n"
-            f"OR with issues:\n"
-            f"-d '{{\"agent\": \"{r}\", \"verdict\": \"request_changes\", \"comments\": ["
-            f"{{\"file\": \"path/file.js\", \"line\": 42, \"text\": \"Issue description\", \"severity\": \"warning\"}}]}}'"
+            f"Task description:\n{desc}{diff_text}\n\n"
+            f"After reviewing, respond with your verdict in this EXACT format at the END of your response:\n"
+            f"VERDICT: approve\n"
+            f"or\n"
+            f"VERDICT: request_changes\n"
+            f"COMMENTS:\n"
+            f"- file.py:42 | warning | Issue description here\n"
+            f"- other.py:10 | error | Another issue"
         )
+        tasks[sub_tid] = {
+            "id": sub_tid,
+            "description": review_desc,
+            "assigned_to": r,
+            "status": "to_do",
+            "depends_on": [],
+            "project": project,
+            "branch": branch,
+            "task_external_id": task.get("task_external_id", ""),
+            "parent_id": tid,
+            "priority": task.get("priority", 5),
+            "created": ts, "started_at": "", "completed_at": "",
+            "created_by": "system",
+            "_is_review_subtask": True,
+            "_review_parent_id": tid,
+        }
+        subtask_ids.append(sub_tid)
+
+        # Also send message for fast pickup (agent polls messages more frequently)
         messages.setdefault(r, []).append({
             "sender": "system", "receiver": r,
-            "content": review_msg,
-            "msg_type": "task", "task_id": tid_str,
+            "content": review_desc,
+            "msg_type": "task", "task_id": str(sub_tid),
+            "_review_parent_id": tid,
             "timestamp": ts,
         })
 
+    # Store subtask IDs on parent for tracking
+    task["_review_subtask_ids"] = subtask_ids
+
     add_activity("system", "code_review", "review_dispatched",
-                 f"Code review #{tid} dispatched to {len(reviewers)} reviewers")
+                 f"Code review #{tid} dispatched to {len(reviewers)} reviewers (subtasks: {subtask_ids})")
     bump_version()
 
 
@@ -347,10 +421,8 @@ def _dispatch_qa(tid):
         f"Code review passed (3/3 approved). Now verify with tests.\n"
         f"Author: {task.get('assigned_to', '?')} | Project: {project} | Branch: {branch}\n\n"
         f"Task: {desc}\n\n"
-        f"Run ALL test suites, linters, and verify the changes. If tests pass, update task status:\n"
-        f"curl -s -X PUT $HUB/tasks/{tid} -H 'Content-Type: application/json' -d '{{\"status\": \"uat\"}}'\n"
-        f"If tests fail:\n"
-        f"curl -s -X PUT $HUB/tasks/{tid} -H 'Content-Type: application/json' -d '{{\"status\": \"failed\", \"detail\": \"Test failures: ...\"}}'"
+        f"Run ALL test suites, linters, and verify the changes work correctly.\n"
+        f"If tests pass, report SUCCESS. If tests fail, report FAILURE with details."
     )
     messages.setdefault(qa_agent, []).append({
         "sender": "system", "receiver": qa_agent,
@@ -368,121 +440,69 @@ def _is_qa_agent(name):
     return any(h in low for h in _QA_AGENT_HINTS)
 
 
-def _maybe_create_rework_cycle(failed_tid):
-    """When a QA/review task fails, auto-create rework for dev + re-verify for QA.
+def _handle_qa_failure(tid, old_status, detail=""):
+    """When QA fails a task (in_testing → failed), send it back to in_progress.
 
-    This creates a continuous iteration loop: dev → QA → dev → QA → ...
-    until QA passes or MAX_REWORK_ITERATIONS is hit.
+    Same task cycles: in_progress → code_review → in_testing → (QA fail) → in_progress → ...
+    Returns True if the task was redirected back to in_progress.
     """
-    failed_task = tasks.get(failed_tid, {})
-    failed_agent = failed_task.get("assigned_to", "")
+    if old_status != "in_testing":
+        return False  # Not a QA failure — let normal failure handling proceed
 
-    # Only trigger for QA/review agents — dev failures don't auto-rework
-    if not _is_qa_agent(failed_agent):
-        return
+    task = tasks.get(tid)
+    if not task:
+        return False
 
-    # Find the dev task this QA task was checking (from depends_on)
-    deps = failed_task.get("depends_on", [])
-    if not deps:
-        return  # No dependency chain → can't determine what to rework
+    qa_cycle = task.get("_qa_cycle", 0) + 1
 
-    # The first dependency is typically the dev task
-    dev_tid = deps[0]
-    dev_task = tasks.get(dev_tid, {})
-    if not dev_task:
-        return
-
-    dev_agent = dev_task.get("assigned_to", "")
-    if not dev_agent:
-        return
-
-    # Track iteration count
-    iteration = failed_task.get("iteration", 1) + 1
-    if iteration > MAX_REWORK_ITERATIONS:
+    if qa_cycle > MAX_REWORK_ITERATIONS:
+        # Max QA cycles reached — let task stay failed
         ts = datetime.now().isoformat()
         messages.setdefault("user", []).append({
             "sender": "system", "receiver": "user",
-            "content": f"🔄 Max iterations ({MAX_REWORK_ITERATIONS}) reached for task chain "
-                       f"#{dev_tid} ↔ #{failed_tid}. Manual intervention needed.",
+            "content": f"🔄 Max QA cycles ({MAX_REWORK_ITERATIONS}) reached for task #{tid}. "
+                       f"Marked as failed — manual intervention needed.",
             "msg_type": "blocker", "timestamp": ts,
         })
-        logger.info(f"Rework cycle max iterations reached: #{dev_tid} ↔ #{failed_tid}")
-        return
+        logger.info(f"QA cycle max reached: #{tid} ({qa_cycle} cycles)")
+        return False
 
-    # Get QA feedback from the failed task
-    qa_feedback = failed_task.get("error_message", "") or failed_task.get("detail", "")
-    if not qa_feedback:
-        qa_feedback = "QA check failed — see QA agent logs for details"
+    # Redirect: set task back to in_progress (same task, new cycle)
+    task["status"] = "in_progress"
+    task["_qa_cycle"] = qa_cycle
+    task["_review_cycle"] = 0  # Reset so code review runs fresh
+    task.pop("completed_at", None)  # Not completed yet
+    qa_feedback = detail or task.pop("error_message", None) or "QA tests failed — see QA agent logs for details"
 
+    dev_agent = task.get("assigned_to", "")
     ts = datetime.now().isoformat()
 
-    # Create rework task for dev
-    rework_tid = max(tasks.keys(), default=0) + 1
-    original_desc = dev_task.get("description", "")
-    rework_desc = (
-        f"REWORK (iteration {iteration}/{MAX_REWORK_ITERATIONS}) — "
-        f"QA #{failed_tid} found issues:\n\n"
-        f"QA FEEDBACK:\n{qa_feedback}\n\n"
-        f"ORIGINAL TASK:\n{original_desc}\n\n"
-        f"Fix ALL issues reported by QA. Run tests/lint before marking done."
-    )
-    tasks[rework_tid] = {
-        "id": rework_tid,
-        "description": rework_desc,
-        "assigned_to": dev_agent,
-        "status": "to_do",
-        "depends_on": [],
-        "project": dev_task.get("project", ""),
-        "branch": dev_task.get("branch", ""),
-        "task_external_id": dev_task.get("task_external_id", ""),
-        "parent_id": dev_tid,
-        "priority": dev_task.get("priority", 5),
-        "created": ts, "started_at": "", "completed_at": "",
-        "created_by": "system",
-        "iteration": iteration,
-        "rework_of": dev_tid,
-    }
-
-    # Create re-verify task for QA (depends on rework)
-    reverify_tid = rework_tid + 1
-    qa_desc = (
-        f"RE-VERIFY (iteration {iteration}/{MAX_REWORK_ITERATIONS}) — "
-        f"Check that {dev_agent}'s rework #{rework_tid} fixed ALL issues.\n\n"
-        f"PREVIOUS QA ISSUES:\n{qa_feedback}\n\n"
-        f"ORIGINAL TASK:\n{original_desc[:500]}\n\n"
-        f"Run ALL tests, lint, and verify each issue is resolved. "
-        f"If ANY issue remains, mark FAILED with detailed feedback."
-    )
-    tasks[reverify_tid] = {
-        "id": reverify_tid,
-        "description": qa_desc,
-        "assigned_to": failed_agent,
-        "status": "to_do",
-        "depends_on": [rework_tid],
-        "project": dev_task.get("project", ""),
-        "branch": dev_task.get("branch", ""),
-        "task_external_id": dev_task.get("task_external_id", ""),
-        "parent_id": failed_tid,
-        "priority": dev_task.get("priority", 5),
-        "created": ts, "started_at": "", "completed_at": "",
-        "created_by": "system",
-        "iteration": iteration,
-        "rework_of": failed_tid,
-    }
-
-    add_activity("system", dev_agent, "rework_cycle",
-                 f"Iteration {iteration}: rework #{rework_tid} → re-verify #{reverify_tid}")
+    # Send QA feedback to dev agent
+    if dev_agent:
+        messages.setdefault(dev_agent, []).append({
+            "sender": "system", "receiver": dev_agent,
+            "content": f"QA FAILURE FEEDBACK — Task #{tid}\n"
+                       f"QA tests failed (cycle {qa_cycle}/{MAX_REWORK_ITERATIONS}).\n\n"
+                       f"FEEDBACK:\n{qa_feedback}\n\n"
+                       f"Fix ALL issues. After fixing, your task will go through code_review → in_testing again.",
+            "msg_type": "qa_feedback", "task_id": str(tid),
+            "timestamp": ts,
+        })
 
     # Notify user
     messages.setdefault("user", []).append({
         "sender": "system", "receiver": "user",
-        "content": f"🔄 Iteration {iteration}: QA #{failed_tid} failed → "
-                   f"rework #{rework_tid} ({dev_agent}) → re-verify #{reverify_tid} ({failed_agent})",
+        "content": f"🔄 Task #{tid} QA failed → sent back to {dev_agent or '?'} for rework "
+                   f"(QA cycle {qa_cycle}/{MAX_REWORK_ITERATIONS}).",
         "msg_type": "info", "timestamp": ts,
     })
 
-    logger.info(f"Rework cycle iteration {iteration}: #{rework_tid} ({dev_agent}) → #{reverify_tid} ({failed_agent})")
+    add_activity("system", dev_agent or "?", "qa_rework",
+                 f"QA failed #{tid} → back to in_progress (cycle {qa_cycle})")
+
+    logger.info(f"QA failure → rework: #{tid} assigned to {dev_agent} (cycle {qa_cycle}/{MAX_REWORK_ITERATIONS})")
     bump_version()
+    return True
 
 
 @router.post("/tasks/{tid}/check")
@@ -686,10 +706,11 @@ def auto_assign_task(name: str):
         # Tasks explicitly assigned to this agent
         candidates = [t for t in tasks.values()
                       if t.get("assigned_to") == name and t.get("status") in ("to_do", "created")]
-        # Unassigned tasks — prefer role-matched
+        # Unassigned tasks — prefer role-matched (exclude review subtasks — they are pre-assigned)
         unassigned = [t for t in tasks.values()
                       if not t.get("assigned_to") and t.get("status") in ("to_do", "created")
-                      and t.get("created_by") != name]
+                      and t.get("created_by") != name
+                      and not t.get("_is_review_subtask")]
         # Score unassigned tasks by role match
         from hub.state import ROUTE_MAP, agent_specialization
         agent_spec = agent_specialization.get(name, {})
@@ -839,6 +860,15 @@ def submit_review(tid: int, data: dict):
                 "resolved": False,
             })
 
+        # Close the reviewer's subtask
+        subtask_ids = tasks[tid].get("_review_subtask_ids", [])
+        for sub_id in subtask_ids:
+            sub = tasks.get(sub_id)
+            if sub and sub.get("assigned_to") == agent and sub.get("status") not in ("done", "failed", "cancelled"):
+                sub["status"] = "done" if verdict == "approve" else "failed"
+                sub["completed_at"] = datetime.now().isoformat()
+                break
+
         add_activity(agent, "code_review", "review_verdict",
                      f"#{tid} {verdict} by {agent}" + (f" ({len(review_comments)} comments)" if review_comments else ""))
 
@@ -884,9 +914,8 @@ def submit_review(tid: int, data: dict):
                         "content": f"CODE REVIEW FEEDBACK — Task #{tid}\n"
                                    f"Reviewers requested changes (cycle {tasks[tid].get('_review_cycle', 1)}/{MAX_REWORK_LOOPS}).\n\n"
                                    f"ISSUES:\n{feedback}\n\n"
-                                   f"Fix all issues and move task back to code_review:\n"
-                                   f"curl -s -X PUT $HUB/tasks/{tid} -H 'Content-Type: application/json' -d '{{\"status\": \"code_review\"}}'",
-                        "msg_type": "task", "task_id": tid_str,
+                                   f"Fix ALL issues above. After fixing, your task will automatically go back to code_review.",
+                        "msg_type": "review_feedback", "task_id": tid_str,
                         "timestamp": ts,
                     })
                 messages.setdefault("user", []).append({
@@ -1009,8 +1038,8 @@ def approve_plan(data: dict):
                     plan_shared_branch = plan_branch if plan_branch.startswith("feature/") else f"feature/{plan_branch}"
                     plan_shared_ext_id = plan_branch.replace("feature/", "")
                 else:
-                    plan_shared_branch = f"feature/TASK-{tid}"
-                    plan_shared_ext_id = f"TASK-{tid}"
+                    plan_shared_branch = ""
+                    plan_shared_ext_id = ""
             task = {
                 "id": tid,
                 "description": step.get("description", ""),

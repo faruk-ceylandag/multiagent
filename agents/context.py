@@ -75,6 +75,9 @@ class AgentContext:
         self._chat_running = False
         self._task_context = ""
 
+        # ── Review subtask tracking ──
+        self._review_parent_id = None  # Parent task ID when this agent is working on a review subtask
+
         # ── Inbox peek (mid-task notification) ──
         self._inbox_count_at_task_start = 0
         self._mid_task_notified = False

@@ -415,21 +415,30 @@ def cleanup(sig=None, frame=None):
 signal.signal(signal.SIGINT, cleanup)
 signal.signal(signal.SIGTERM, cleanup)
 
-agent_list = ', '.join(AGENT_NAMES)
+_visible_names = [a["name"] if isinstance(a, dict) else a for a in AGENTS if not (isinstance(a, dict) and a.get("hidden"))]
+_hidden_names = [a["name"] if isinstance(a, dict) else a for a in AGENTS if isinstance(a, dict) and a.get("hidden")]
+_agent_str = ', '.join(_visible_names)
+if _hidden_names:
+    _agent_str += f"  (+{len(_hidden_names)} reviewers)"
 _dash_url = f"http://localhost:{HUB_PORT}"
 _ws_short = os.path.basename(WORKSPACE) or WORKSPACE
 _lines = [
     f"  Dashboard : {_dash_url}",
     f"  Workspace : {_ws_short}",
-    f"  Agents    : {agent_list}",
+    f"  Agents    : {_agent_str}",
     "",
     "  Press Ctrl+C to stop everything",
 ]
-_w = max(len(l) for l in _lines) + 4
-print(f"\n{BOLD}╔{'═' * _w}╗")
+_term_w = shutil.get_terminal_size((80, 24)).columns
+_content_w = max(len(l) for l in _lines) + 4
+_w = min(_content_w, _term_w - 2)  # leave room for ║ on both sides
+_inner = _w  # inner padding width
+print(f"\n{BOLD}╔{'═' * _inner}╗")
 for l in _lines:
-    print(f"║{l:<{_w}}║")
-print(f"╚{'═' * _w}╝{NC}\n")
+    if len(l) > _inner:
+        l = l[:_inner - 1] + "…"
+    print(f"║{l:<{_inner}}║")
+print(f"╚{'═' * _inner}╝{NC}\n")
 
 # ── Watchdog ──
 MAX_RESTARTS = 5

@@ -548,17 +548,24 @@ def reset_session():
     with lock:
         # Clear agents — they re-register on boot
         agents.clear()
-        # Reset in_progress/code_review tasks to to_do (agent is gone)
+        # Reset in_progress/code_review/in_testing tasks to to_do (agent is gone)
+        # Review subtasks get cancelled (not reset to to_do — they'll be re-created)
         for tid, task in tasks.items():
-            if task.get("status") in ("in_progress", "code_review"):
+            if task.get("_is_review_subtask"):
+                if task.get("status") not in ("done", "failed", "cancelled"):
+                    task["status"] = "cancelled"
+                    task["completed_at"] = datetime.now().isoformat()
+            elif task.get("status") in ("in_progress", "code_review", "in_testing"):
                 task["status"] = "to_do"
                 task.pop("assigned_to", None)
                 task.pop("review_dispatched_at", None)
+                task.pop("_review_subtask_ids", None)
         # Dismiss stale pending plans
         for pid, plan in pending_plans.items():
             if plan.get("status") == "pending":
                 plan["status"] = "dismissed"
         # Clear volatile state
+        task_reviews.clear()
         messages.clear()
         analytics_log.clear()
         activity.clear()
@@ -776,7 +783,7 @@ def _build_dashboard_data():
     usage_snap = dict(usage_log)
     locks_snap = dict(file_locks)
     changes_snap = list(changes)
-    tasks_snap = list(tasks.values())
+    tasks_snap = [t for t in tasks.values() if not t.get("_is_review_subtask")]
 
     ai = {}
     for n in agent_names:
@@ -908,8 +915,17 @@ def _review_timeout_timer():
                                 if all(reviews.get(r, {}).get("verdict") == "approve" for r in reviewers):
                                     task["status"] = "in_testing"
                                     task.pop("review_dispatched_at", None)
+                                    # Mark remaining review subtasks as done (auto-approved)
+                                    for sub_id in task.get("_review_subtask_ids", []):
+                                        sub = tasks.get(sub_id)
+                                        if sub and sub.get("status") not in ("done", "failed", "cancelled"):
+                                            sub["status"] = "done"
+                                            sub["completed_at"] = now.isoformat()
                                     add_activity("system", task.get("assigned_to", "?"), "review_auto_approved",
                                                  f"Code review #{tid} auto-approved (15 min timeout)")
+                                    # Dispatch QA so task doesn't get stuck in in_testing
+                                    from hub.routers.tasks import _dispatch_qa
+                                    _dispatch_qa(tid)
                                 bump_version()
                         except (ValueError, TypeError):
                             pass
