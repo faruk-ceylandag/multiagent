@@ -730,6 +730,7 @@ def _build_dashboard_data():
     total_cost = calc_total_cost()
 
     return {
+        "workspace": os.path.basename(WORKSPACE) if WORKSPACE else "",
         "agents": ai, "agent_names": agent_names,
         "pending": {k: len(v) for k, v in msgs_snap.items() if v},
         "tasks": sorted(tasks_snap,

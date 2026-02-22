@@ -1,4 +1,4 @@
-# Multi-Agent System
+# Claude Multi-Agent Collaborate System
 
 A team of AI agents that collaborate to build, test, and ship your code. You give tasks, they handle the rest — architect plans, devs implement, QA tests, reviewer checks.
 

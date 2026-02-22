@@ -1,18 +1,35 @@
 /* style.css — Multi-Agent Dashboard */
 :root { --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
   --fg: #e6edf3; --fg2: #8b949e; --fg3: #484f58;
-  --ac: #8b5cf6; --blue: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922; --cyan: #39d353; --magenta: #d946ef; }
+  --ac: #8b5cf6; --blue: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922; --cyan: #39d353; --magenta: #d946ef;
+  --log-bg: #0a0e14; }
 [data-theme="light"] { --bg: #ffffff; --bg2: #f6f8fa; --bg3: #eaeef2; --border: #d0d7de;
   --fg: #1f2328; --fg2: #656d76; --fg3: #8b949e;
-  --ac: #7c3aed; --blue: #0969da; --green: #1a7f37; --red: #cf222e; --yellow: #9a6700; --cyan: #1a7f37; --magenta: #a21caf; }
+  --ac: #7c3aed; --blue: #0969da; --green: #1a7f37; --red: #cf222e; --yellow: #9a6700; --cyan: #1a7f37; --magenta: #a21caf;
+  --log-bg: #f0f2f5; }
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:var(--bg); color:var(--fg); display:flex; height:100vh; overflow:hidden; }
+
+/* ── Global Interactive States ── */
+button:not(.tab-btn):not(.sidebar-toggle):hover { filter:brightness(1.15); }
+button:focus-visible { outline:2px solid var(--ac); outline-offset:2px; }
+button:disabled { opacity:0.5; cursor:not-allowed; filter:none; }
+input:focus, select:focus, textarea:focus { border-color:var(--ac); outline:none; }
+::placeholder { color:var(--fg3); opacity:0.7; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width:6px; height:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--fg3); border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:var(--fg2); }
 
 /* ── Sidebar ── */
 #sidebar { width:220px; background:var(--bg2); border-right:1px solid var(--border); display:flex; flex-direction:column; flex-shrink:0; }
 .sidebar-hdr { padding:12px 14px 8px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:8px; }
-.sidebar-hdr h1 { font-size:14px; font-weight:700; flex:1; }
-.sidebar-hdr button { background:none; border:none; cursor:pointer; font-size:16px; padding:2px; color:var(--fg2); }
+.sidebar-hdr h1 { font-size:14px; font-weight:700; }
+.repo-badge { font-size:9px; color:var(--cyan); background:var(--bg3); padding:2px 6px; border-radius:4px; font-family:'SF Mono',Consolas,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100px; flex:1; }
+.sidebar-hdr button { background:none; border:none; cursor:pointer; font-size:16px; padding:4px 6px; border-radius:4px; color:var(--fg2); transition:background .15s; }
+.sidebar-hdr button:hover { background:var(--bg3); }
 #agentList { flex:1; overflow-y:auto; padding:6px; }
 .agent-card { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:8px; cursor:pointer; margin-bottom:2px; position:relative; transition:background .15s; }
 .agent-card:hover { background:var(--bg3); }
@@ -76,8 +93,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .log-header strong { font-size:13px; }
 .log-search { padding:4px 8px; background:var(--bg2); border:1px solid var(--border); border-radius:4px; color:var(--fg); font-size:11px; flex:1; max-width:200px; }
 .log-merge-btn { background:var(--bg2); border:1px solid var(--border); border-radius:4px; cursor:pointer; font-size:14px; padding:2px 6px; }
-.log-area { font-family:'SF Mono',Consolas,monospace; font-size:11px; line-height:1.6; overflow-y:auto; overflow-wrap:break-word; word-break:break-word; max-height:calc(100vh - 180px); padding:10px 12px; background:#0a0e14; border-radius:8px; border:1px solid var(--border); color:var(--fg); position:relative; }
-[data-theme="light"] .log-area { background:#f0f2f5; }
+.log-area { font-family:'SF Mono',Consolas,monospace; font-size:11px; line-height:1.6; overflow-y:auto; overflow-wrap:break-word; word-break:break-word; max-height:calc(100vh - 180px); padding:10px 12px; background:var(--log-bg); border-radius:8px; border:1px solid var(--border); color:var(--fg); position:relative; }
 .log-area > div { padding:1px 0; animation:logFadeIn .15s ease; }
 @keyframes logFadeIn { from{opacity:0;transform:translateY(2px)} to{opacity:1;transform:translateY(0)} }
 .log-area .tool { color:var(--blue); }
@@ -120,7 +136,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .kanban-col { background:var(--bg2); border-radius:8px; padding:8px; min-height:120px; border:1px solid var(--border); }
 .kanban-title { font-size:11px; font-weight:600; padding:4px 0 8px; border-bottom:1px solid var(--border); margin-bottom:6px; }
 .kanban-count { background:var(--bg3); padding:1px 6px; border-radius:8px; font-size:10px; margin-left:4px; }
-.task-card { background:var(--bg); padding:8px; border-radius:6px; margin-bottom:6px; border:1px solid var(--border); font-size:11px; }
+.task-card { background:var(--bg); padding:8px; border-radius:6px; margin-bottom:6px; border:1px solid var(--border); font-size:11px; transition:border-color .15s; }
+.task-card:hover { border-color:var(--fg3); }
 .task-card.task-done { border-left:3px solid var(--green); } .task-card.task-failed { border-left:3px solid var(--red); }
 .task-card.task-cancelled { border-left:3px solid var(--fg3); opacity:.6; }
 .task-card.task-in_progress { border-left:3px solid var(--blue); }
@@ -150,7 +167,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .inbox-clear-all { background:var(--bg2); border:1px solid var(--border); border-radius:4px; color:var(--fg2); cursor:pointer; font-size:11px; padding:4px 10px; }
 .inbox-clear-all:hover { border-color:var(--red); color:var(--red); }
 .inbox-count { font-size:11px; color:var(--fg2); }
-.inbox-thread { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:8px; }
+.inbox-thread { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:8px; transition:border-color .15s; }
+.inbox-thread:hover { border-color:var(--fg3); }
 .inbox-thread-solo { border:none; background:transparent; padding:0; }
 .inbox-header { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
 .inbox-sender { font-weight:600; font-size:12px; } .inbox-type { font-size:10px; color:var(--fg3); background:var(--bg3); padding:1px 4px; border-radius:3px; }

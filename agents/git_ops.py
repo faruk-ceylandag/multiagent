@@ -349,7 +349,7 @@ def collect_changes(ctx, desc="", project=None):
                 files.append({"status": "A", "path": line})
         if files:
             hub_post(ctx, "/changes", {"agent": ctx.AGENT_NAME, "project": name,
-                                       "description": desc, "diff": combined[:50000],
+                                       "description": clean_title(desc), "diff": combined[:50000],
                                        "files": files[:50]})
 
 

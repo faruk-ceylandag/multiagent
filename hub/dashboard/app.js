@@ -215,6 +215,9 @@ function _applyDashboardData(d) {
   renderSidebar(names);
   updateBadges();
   if (panelNeedsUpdate) renderPanel();
+  // Update repo badge
+  const repoEl=$('repoName');
+  if(repoEl&&d.workspace){repoEl.textContent=d.workspace;repoEl.title=d.workspace;}
 }
 
 // ══════════════════════════════════
@@ -340,6 +343,17 @@ function toggleSound() {
   const btn = $('soundBtn');
   if (btn) btn.textContent = soundOn ? '🔊' : '🔇';
   toast('Sound ' + (soundOn ? 'on' : 'off'), 'info', 2000);
+}
+
+function cleanTitle(raw) {
+  let s = (raw || '').trim();
+  while (s.startsWith('[')) {
+    const end = s.indexOf(']');
+    if (end === -1) break;
+    s = s.substring(end + 1).trim();
+  }
+  s = s.replace(/^[-*]\s+/, '').trim();
+  return s || raw.trim();
 }
 
 function formatDiff(text) {
@@ -1159,6 +1173,39 @@ function renderInbox(p){
             </div>
             <div class="bubble-meta">${timeStr}</div></div>`;
         }
+        if(m.msg_type==='plan_proposal'&&m.plan_id!=null){
+          const planId=m.plan_id;
+          const steps=m.plan_steps||[];
+          const plan=(data.pending_plans||{})[planId];
+          const isApproved=plan&&plan.status!=='pending';
+          // Init selections — all selected by default
+          if(!planSelections.has(planId)){
+            planSelections.set(planId,new Set(steps.map((_,i)=>i)));
+          }
+          const sel=planSelections.get(planId);
+          const allChecked=steps.length>0&&steps.every((_,i)=>sel.has(i));
+          return`<div class="chat-bubble chat-bubble-agent plan-proposal-bubble">
+            <span class="bubble-type" style="background:var(--ac);color:#fff">plan</span>
+            <div style="margin:6px 0 4px;font-weight:600;font-size:12px">${esc(content.substring(0,200))}</div>
+            ${m.project?`<span class="text-xs text-dim">Project: ${esc(m.project)}</span> `:''}${m.branch?`<span class="text-xs text-cyan font-mono">${esc(m.branch)}</span>`:''}
+            ${isApproved?`<div style="margin:8px 0;padding:6px 10px;background:rgba(63,185,80,0.1);border-radius:6px;font-size:11px;color:var(--green)">✓ Plan ${esc(plan.status)}</div>`:`
+            <div class="plan-steps" style="margin:8px 0">
+              <label class="plan-select-all"><input type="checkbox" ${allChecked?'checked':''} onchange="toggleAllPlanSteps(${planId},this.checked)"> <span class="text-xs text-muted">Select all</span></label>
+              ${steps.map((s,i)=>{
+                const checked=sel.has(i);
+                const depLabel=s.depends_on_step!=null?` <span class="text-xs text-yellow">← step ${Array.isArray(s.depends_on_step)?s.depends_on_step.map(d=>d+1).join(','):s.depends_on_step+1}</span>`:'';
+                return`<div class="plan-step ${checked?'':'plan-step-unchecked'}">
+                  <label><input type="checkbox" ${checked?'checked':''} onchange="togglePlanStep(${planId},${i},this.checked)" style="accent-color:var(--ac);margin-right:6px">
+                  <strong>#${i+1}</strong> ${esc(s.description||'')}
+                  ${s.assigned_to?` <span class="badge-sm" style="background:var(--bg3);color:var(--ac)">${esc(s.assigned_to)}</span>`:''}${depLabel}</label></div>`;
+              }).join('')}
+            </div>
+            <div class="flex-center gap-6" style="margin-top:8px">
+              <button class="btn-sm" style="background:var(--green);color:#000" onclick="approvePlan(${planId})">✓ Approve Selected</button>
+              <button class="btn-sm btn-ghost" onclick="dismissPlan(${planId})">✗ Dismiss</button>
+            </div>`}
+            <div class="bubble-meta">${esc(m.sender)} · ${timeStr}</div></div>`;
+        }
         return`<div class="chat-bubble chat-bubble-agent">${m.msg_type&&m.msg_type!=='info'&&m.msg_type!=='message'?`<span class="bubble-type">${m.msg_type}</span>`:''
           }${displayContent}${isLong?`<span class="bubble-collapsed" data-full="${fullContent.replace(/"/g,'&quot;')}">… <button class="bubble-toggle" onclick="expandBubble(this)">Show more</button></span>`:''
           }${m.msg_type==='check_report'?`<div class="bubble-actions"><button class="btn-sm" style="background:var(--ac);color:#fff" onclick="navigator.clipboard.writeText(${JSON.stringify(content).replace(/'/g,"\\'")});toast('Copied','success',2000)">📋 Copy</button></div>`:''
@@ -1198,6 +1245,45 @@ function startChatWith(agent){
 
 async function dismissSender(s){await fetch(HUB+'/messages/user/dismiss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sender:s})});setTimeout(fetchInbox,200);}
 async function dismissAll(){if(!confirm('Clear all?'))return;await fetch(HUB+'/messages/user/dismiss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({all:true})});setTimeout(fetchInbox,200);}
+
+// ── Plan Approval ──
+function togglePlanStep(planId,idx,checked){
+  let sel=planSelections.get(planId);
+  if(!sel){sel=new Set();planSelections.set(planId,sel);}
+  if(checked)sel.add(idx);else sel.delete(idx);
+  if(tab==='inbox')renderPanel();
+}
+function toggleAllPlanSteps(planId,checked){
+  const plan=(data.pending_plans||{})[planId];
+  const msgs=inbox.filter(m=>m.msg_type==='plan_proposal'&&m.plan_id==planId);
+  const steps=msgs.length?(msgs[0].plan_steps||[]):((plan||{}).steps||[]);
+  let sel=planSelections.get(planId);
+  if(!sel){sel=new Set();planSelections.set(planId,sel);}
+  if(checked)steps.forEach((_,i)=>sel.add(i));else sel.clear();
+  if(tab==='inbox')renderPanel();
+}
+async function approvePlan(planId){
+  const sel=planSelections.get(planId);
+  if(!sel||sel.size===0){toast('Select at least one step','warn');return;}
+  const res=await fetch(HUB+'/plan/approve',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({plan_id:planId,selected_steps:[...sel]})});
+  const j=await res.json();
+  if(j.status==='ok'){
+    toast(`Plan #${planId} approved — ${j.tasks_created.length} task(s) created`,'success');
+    planSelections.delete(planId);
+    setTimeout(fetchInbox,300);
+  }else{toast(j.message||'Approve failed','error');}
+}
+async function dismissPlan(planId){
+  const res=await fetch(HUB+'/plan/dismiss',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({plan_id:planId})});
+  const j=await res.json();
+  if(j.status==='ok'){
+    toast(`Plan #${planId} dismissed`,'info');
+    planSelections.delete(planId);
+    setTimeout(fetchInbox,300);
+  }else{toast(j.message||'Dismiss failed','error');}
+}
 
 async function replyTo(sender,inputId){
   const input=$(inputId);const text=(input?.value||'').trim();if(!text)return;
@@ -1294,7 +1380,7 @@ function renderReview(p){
     </div>
     ${c.description?`<div class="text-sm text-muted truncate" style="margin:4px 0">${esc(c.description).substring(0,200)}</div>`:''}
     ${c.status==='pending'?`<div style="margin:6px 0">
-      <input id="rc_msg_${c.id}" class="commit-msg-input" value="${escAttr(taskRef+' | '+(c.description||'').substring(0,60))}" placeholder="Commit message..." style="width:100%;padding:5px 8px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px;margin-bottom:4px">
+      <input id="rc_msg_${c.id}" class="commit-msg-input" value="${escAttr(taskRef+' | '+cleanTitle((c.description||'').substring(0,80)))}" placeholder="Commit message..." style="width:100%;padding:5px 8px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px;margin-bottom:4px">
       <div class="flex-center gap-4">
         <button class="btn-sm" style="background:var(--green);color:#000" onclick="commitChanges('${escAttr(c.project)}','rc_msg_${c.id}',${c.id})">✓ Commit</button>
         <button class="btn-sm" style="background:var(--ac);color:#fff" onclick="commitAndPush('${escAttr(c.project)}','rc_msg_${c.id}',${c.id})">🚀 Commit & Push</button>
@@ -1857,7 +1943,6 @@ async function sendCmd(){
     if(r.intent)intent=r.intent;
   }catch{}
 
-  const taskExternalId=Date.now().toString(36)+Math.random().toString(36).slice(2,6);
   if(intent==='task'){
     const taskPayload={
       description:text,
@@ -1865,10 +1950,13 @@ async function sendCmd(){
       status:'created',
       priority:5,
       created_by:'user',
-      task_external_id:taskExternalId
     };
     const taskResult=await(await fetch(HUB+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(taskPayload)})).json();
     const taskId=taskResult?.id;
+    const taskExternalId=taskId?'TASK-'+taskId:'TASK-0';
+
+    // Update task with external ID
+    if(taskId) fetch(HUB+'/tasks/'+taskId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_external_id:taskExternalId})});
 
     const msgPayload={
       sender:'user',receiver:target,content:text,msg_type:'task',

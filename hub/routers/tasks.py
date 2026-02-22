@@ -767,6 +767,27 @@ def approve_plan(data: dict):
             "content": f"Plan #{plan_id} approved — {len(created_tasks)} task(s) created.",
             "msg_type": "info", "timestamp": ts,
         })
+
+        # Auto-start: send task message to agents whose deps are already met
+        for ct in created_tasks:
+            task = tasks[ct["task_id"]]
+            agent = task.get("assigned_to", "")
+            if not agent:
+                continue
+            deps = task.get("depends_on", [])
+            deps_met = all(tasks.get(d, {}).get("status") == "done" for d in deps)
+            if deps_met:
+                messages.setdefault(agent, []).append({
+                    "sender": plan.get("created_by", "architect"),
+                    "receiver": agent,
+                    "content": f"#{ct['task_id']} {task['description']}",
+                    "msg_type": "task",
+                    "task_id": str(ct["task_id"]),
+                    "project": task.get("project", ""),
+                    "branch": task.get("branch", ""),
+                    "timestamp": ts,
+                })
+
         bump_version()
         save_state()
 
