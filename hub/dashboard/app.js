@@ -1939,7 +1939,18 @@ async function sendCmd(){
     };
     const taskResult=await(await fetch(HUB+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(taskPayload)})).json();
     const taskId=taskResult?.id;
-    const taskExternalId=taskId?'TASK-'+taskId:'TASK-0';
+    // Extract ticket ID from URLs (Jira, Linear, GitHub, Sentry) before falling back to TASK-{n}
+    let taskExternalId=taskId?'TASK-'+taskId:'TASK-0';
+    const jiraM=text.match(/atlassian\.net\/browse\/([A-Z]{2,10}-\d+)/);
+    const linearM=!jiraM&&text.match(/linear\.app\/[^/]+\/issue\/([A-Z]+-\d+)/);
+    const ghM=!jiraM&&!linearM&&text.match(/github\.com\/[^/]+\/[^/]+\/(?:issues|pull)\/(\d+)/);
+    const sentryM=!jiraM&&!linearM&&!ghM&&text.match(/sentry\.io\/issues\/(\d+)/);
+    const genericJiraM=!jiraM&&!linearM&&!ghM&&!sentryM&&text.match(/\b([A-Z]{2,10}-\d{1,6})\b/);
+    if(jiraM)taskExternalId=jiraM[1];
+    else if(linearM)taskExternalId=linearM[1];
+    else if(ghM)taskExternalId='GH-'+ghM[1];
+    else if(sentryM)taskExternalId='SENTRY-'+sentryM[1];
+    else if(genericJiraM)taskExternalId=genericJiraM[1];
 
     // Update task with external ID
     if(taskId) fetch(HUB+'/tasks/'+taskId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_external_id:taskExternalId})});

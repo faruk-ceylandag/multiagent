@@ -643,7 +643,10 @@ while True:
             if not task_external_id and ctx.current_task_id:
                 td = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
                 if td and isinstance(td, dict):
-                    task_external_id = td.get("branch", "") or td.get("task_external_id", "")
+                    candidate = td.get("branch", "") or td.get("task_external_id", "")
+                    # Skip auto-generated TASK-{n} IDs — prefer extracting real ticket IDs from URLs below
+                    if candidate and not re.match(r'^(feature/)?TASK-\d+$', candidate):
+                        task_external_id = candidate
 
             if not task_external_id:
                 for m in msgs:
