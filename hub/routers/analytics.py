@@ -7,7 +7,7 @@ from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
 
 from hub.state import (
-    lock, logger, WORKSPACE, ALL_AGENTS, agents, pipeline, sessions, tasks,
+    lock, logger, WORKSPACE, ALL_AGENTS, HIDDEN_AGENTS, agents, pipeline, sessions, tasks,
     usage_log, file_locks, messages, changes, activity, analytics_log,
     rate_limited_agents, sse_clients, agent_progress, agent_specialization,
     agent_learnings, test_results, auto_scale_config, user_sessions,
@@ -30,7 +30,7 @@ def get_analytics():
     tasks_snap = list(tasks.values())
     rl_snap = dict(rate_limited_agents)
     by_agent = {}
-    all_names = sorted(set(ALL_AGENTS) | set(usage_snap.keys()))
+    all_names = sorted((set(ALL_AGENTS) | set(usage_snap.keys())) - HIDDEN_AGENTS)
     for a in all_names:
         u = usage_snap.get(a, {})
         td = len([t for t in tasks_snap if t.get("assigned_to") == a and t.get("status") == "done"])

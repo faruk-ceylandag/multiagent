@@ -314,8 +314,9 @@ Task status → in_testing
 | `chat` | user → agent | Quick question |
 | `info` | system → agent/user | Status notification |
 | `blocker` | agent → user | Blocking issue (credentials, access) |
-| `review_feedback` | system → dev | Code review change requests |
-| `qa_feedback` | system → dev | QA failure details |
+| `review_feedback` | system → dev | Code review change requests (triggers rework) |
+| `qa_feedback` | system → dev | QA failure details (triggers rework) |
+| `uat_feedback` | system → dev | UAT rejection feedback (triggers rework) |
 | `credential` | system → agents | Broadcast new credentials |
 | `plan_proposal` | architect → user | Plan for approval |
 | `ecosystem_update` | system → agents | Peer broadcasts |
@@ -465,6 +466,20 @@ User actions (REST calls from dashboard):
 | Config reload | 15s | state.py | Hot-reload interval |
 | Save interval | 10s | state.py | State persistence check |
 | Backup rotation | 5 min | state.py | .bak.1/.bak.2/.bak.3 cycle |
+
+## Safety Guards (CRITICAL — do not remove)
+
+These guards prevent subtle lifecycle bugs. Each was added to fix a real failure mode.
+
+| Guard | Location | What it prevents |
+|---|---|---|
+| Reviewer auto-injection | `state.py:41-47` + hot-reload | Reviewers missing from ALL_AGENTS → silent auto-approve |
+| submit_review status check | `tasks.py:835` | Stale verdicts from old review cycles causing duplicate QA dispatch |
+| Auto-assign hidden exclusion | `tasks.py:706` | Reviewers grabbing regular dev tasks during idle |
+| UAT rejection → uat_feedback | `tasks.py:973` | UAT rework not resetting dev session (stale context) |
+| safe_project_dir(".") | `state.py:764` | Code review diff collection failing for single-project workspaces |
+| Rework session reset | `worker.py:619` | Dev using stale Claude session on qa/review/uat feedback |
+| Feedback msg_type recognition | `worker.py:559` | qa_feedback/review_feedback/uat_feedback not treated as tasks |
 
 ## File Dependencies
 

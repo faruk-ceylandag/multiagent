@@ -659,12 +659,16 @@ def _config_reload_timer():
                             HIDDEN_AGENTS.clear()
                             HIDDEN_AGENTS.update(new_hidden)
                             VISIBLE_AGENTS[:] = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
-                            # Init message queues and log buffers for new agents
+                            # Init message queues, log buffers, and counters for new agents
                             for a in ALL_AGENTS:
                                 if a not in messages:
-                                    messages[a] = deque(maxlen=200)
+                                    messages[a] = []
                                 if a not in log_buffers:
-                                    log_buffers[a] = deque(maxlen=2000)
+                                    log_buffers[a] = deque(maxlen=3000)
+                                if a not in log_counters:
+                                    log_counters[a] = 0
+                                if a not in chat_queue:
+                                    chat_queue[a] = []
                             logger.info(f"Agents updated: {ALL_AGENTS} (hidden: {HIDDEN_AGENTS})")
                     _cfg.update(new_cfg)
                 logger.info(f"Config reloaded: budget=${BUDGET_LIMIT}, notifications={'on' if notification_config.get('url') else 'off'}")
@@ -760,6 +764,9 @@ def git_cmd(args, cwd=None):
 def safe_project_dir(project):
     if not project:
         return None
+    # Single-project workspace: "." means WORKSPACE itself
+    if project == ".":
+        return WORKSPACE or None
     clean = os.path.basename(project.replace("\\", "/"))
     if not clean or clean.startswith(".") or ".." in clean:
         return None
@@ -827,7 +834,7 @@ def _build_dashboard_data():
             "cost": calc_agent_cost(n),
         }
     # Analytics summary (real-time, no HTTP fetch needed)
-    all_names = sorted(set(agent_names) | set(usage_snap.keys()))
+    all_names = sorted((set(agent_names) | set(usage_snap.keys())) - HIDDEN_AGENTS)
     by_agent = {}
     for a_name in all_names:
         u = usage_snap.get(a_name, {})

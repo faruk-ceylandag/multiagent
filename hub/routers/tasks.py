@@ -12,7 +12,7 @@ from hub.state import (
 )
 
 MAX_REWORK_ITERATIONS = 5
-_QA_AGENT_HINTS = {"qa", "review", "reviewer", "test", "tester", "quality"}
+_QA_AGENT_HINTS = {"qa", "test", "tester", "quality"}
 
 router = APIRouter(tags=["tasks"])
 
@@ -702,6 +702,9 @@ def task_ready(tid: int):
 # ── Auto-assign ──
 @router.post("/tasks/auto-assign/{name}")
 def auto_assign_task(name: str):
+    # Hidden agents (reviewers) only get work via direct message, never auto-assign
+    if name in HIDDEN_AGENTS:
+        return {"status": "none"}
     with lock:
         # Tasks explicitly assigned to this agent
         candidates = [t for t in tasks.values()
@@ -833,6 +836,9 @@ def submit_review(tid: int, data: dict):
     tid_str = str(tid)
     if tid not in tasks:
         return {"status": "not_found"}
+    # Reject stale verdicts — task must be in code_review to accept reviews
+    if tasks[tid].get("status") != "code_review":
+        return {"status": "error", "message": f"Task not in code_review (current: {tasks[tid].get('status')})"}
     agent = data.get("agent", "")
     verdict = data.get("verdict", "")
     if verdict not in ("approve", "request_changes"):
@@ -966,11 +972,11 @@ def uat_decision(tid: int, data: dict):
             dev_agent = task.get("assigned_to", "")
             if dev_agent:
                 messages.setdefault(dev_agent, []).append({
-                    "sender": "user", "receiver": dev_agent,
+                    "sender": "system", "receiver": dev_agent,
                     "content": f"UAT REJECTED — Task #{tid}\n"
                                f"User feedback: {feedback or 'No specific feedback provided.'}\n\n"
                                f"Please address the feedback and move task back to code_review when done.",
-                    "msg_type": "task", "task_id": str(tid),
+                    "msg_type": "uat_feedback", "task_id": str(tid),
                     "timestamp": ts,
                 })
             add_activity("user", dev_agent or "?", "uat_rejected",

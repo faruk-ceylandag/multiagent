@@ -556,10 +556,10 @@ while True:
                 set_status(ctx, "idle")
                 continue
 
-        _TASK_MSG_TYPES = {"task", "qa_feedback", "review_feedback"}
+        _TASK_MSG_TYPES = {"task", "qa_feedback", "review_feedback", "uat_feedback"}
         is_task = any(m.get("msg_type") in _TASK_MSG_TYPES or
                      (m.get("msg_type") == "message" and len(m.get("content", "")) > 10) for m in msgs)
-        _is_rework = any(m.get("msg_type") in ("qa_feedback", "review_feedback") for m in msgs)
+        _is_rework = any(m.get("msg_type") in ("qa_feedback", "review_feedback", "uat_feedback") for m in msgs)
         is_chat_only = all(m.get("msg_type") == "chat" for m in msgs if m.get("sender") == "user")
 
         # ── System "task unblocked" notifications → fetch real task from hub ──
