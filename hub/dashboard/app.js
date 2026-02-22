@@ -1905,13 +1905,29 @@ async function sendCmd(){
     if(r.status==='ok'){notify('🔑 Saved: '+credMatch[1]);_sending=false;if(btn){btn.disabled=false;btn.textContent='Send';}return;}
   }
 
-  // Auto-route: use /route endpoint (returns target + intent)
+  // Determine target: @mention > sidebar selection > /route auto-detect
   let target='architect', intent='task';
+  const atMatch=text.match(/^@(\w+)\s/);
+  if(atMatch && (data.agent_names||[]).includes(atMatch[1])){
+    target=atMatch[1];
+  } else if(sel && (data.agent_names||[]).includes(sel)){
+    target=sel;
+  } else {
+    try{
+      const r=await(await fetch(HUB+'/route?msg='+encodeURIComponent(text))).json();
+      if(r.target)target=r.target;
+    }catch{}
+  }
+  // AI intent classification (with heuristic fallback)
   try{
-    const r=await(await fetch(HUB+'/route?msg='+encodeURIComponent(text))).json();
-    if(r.target)target=r.target;
-    if(r.intent)intent=r.intent;
-  }catch{}
+    const ic=await(await fetch(HUB+'/classify-intent?msg='+encodeURIComponent(text))).json();
+    if(ic.intent)intent=ic.intent;
+  }catch{
+    try{
+      const r=await(await fetch(HUB+'/route?msg='+encodeURIComponent(text))).json();
+      if(r.intent)intent=r.intent;
+    }catch{}
+  }
 
   if(intent==='task'){
     const taskPayload={
@@ -1963,15 +1979,28 @@ function updateRouteHint(text){
   const hint=$('routeHint');if(!hint||!text){if(hint)hint.style.display='none';return;}
   clearTimeout(routeTimer);
   routeTimer=setTimeout(async()=>{try{
-    const r=await(await fetch(HUB+'/route?msg='+encodeURIComponent(text))).json();
-    if(r.target){
-      const icon=r.intent==='chat'?'💬':'📋';
-      const label=r.intent==='chat'?'chat':'task';
-      hint.innerHTML=`${icon} ${label} → ${r.target}`;
+    // Determine target: @mention > sidebar > /route
+    let target=null;
+    const atMatch=text.match(/^@(\w+)\s/);
+    if(atMatch && (data.agent_names||[]).includes(atMatch[1])){
+      target=atMatch[1];
+    } else if(sel && (data.agent_names||[]).includes(sel)){
+      target=sel;
+    }
+    if(!target){
+      try{const r=await(await fetch(HUB+'/route?msg='+encodeURIComponent(text))).json();target=r.target||null;}catch{}
+    }
+    // AI intent classification
+    let intent='task';
+    try{const ic=await(await fetch(HUB+'/classify-intent?msg='+encodeURIComponent(text))).json();if(ic.intent)intent=ic.intent;}catch{}
+    if(target){
+      const icon=intent==='chat'?'💬':'📋';
+      const label=intent==='chat'?'chat':'task';
+      hint.innerHTML=`${icon} ${label} → ${target}`;
       hint.style.display='inline-block';
-      hint.style.background=r.intent==='chat'?'var(--cyan)':'var(--ac)';
+      hint.style.background=intent==='chat'?'var(--cyan)':'var(--ac)';
     } else hint.style.display='none';
-  }catch{hint.style.display='none';}},400);
+  }catch{hint.style.display='none';}},600);
 }
 
 async function exportSession(){try{

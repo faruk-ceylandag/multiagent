@@ -1,7 +1,8 @@
 """Agent management routes: register, add, remove, edit, status, progress, specialization, learning."""
 
-import os, json, re, time
+import os, json, re, time, subprocess, threading
 from datetime import datetime
+from collections import OrderedDict
 from fastapi import APIRouter
 
 from hub.state import (
@@ -138,6 +139,78 @@ def detect_route(msg: str = ""):
     if len(msg) > 100:
         return {"target": "architect" if "architect" in ALL_AGENTS else ALL_AGENTS[0], "confidence": "default", "intent": intent}
     return {"target": "architect" if "architect" in ALL_AGENTS else ALL_AGENTS[0], "confidence": "default", "intent": intent}
+
+# ── AI Intent Classification ──
+_intent_cache = OrderedDict()
+_intent_cache_lock = threading.Lock()
+_INTENT_CACHE_MAX = 100
+
+def _heuristic_intent(msg):
+    """Fallback regex-based intent classification."""
+    low = msg.lower().strip()
+    _CHAT_PATTERNS = [
+        r'^(hi|hello|hey|merhaba|selam|naber|nas\u0131l)',
+        r'^(thanks|te\u015fekk\u00fcr|sa\u011fol|eyvallah|ok|tamam|anlad\u0131m|evet|hay\u0131r)',
+        r'^(what|how|why|where|when|who|which|ne |nas\u0131l |neden |nerede |kim |hangi )',
+        r'\?$',
+        r'^(status|durum|ne oldu|neredesin|bitir?di mi|bitti mi)',
+        r'^(show|list|g\u00f6ster|listele|ka\u00e7 tane)',
+        r'^(stop|dur|cancel|iptal|bekle|wait)',
+    ]
+    _TASK_PATTERNS = [
+        r'https?://',
+        r'\.(js|ts|py|css|html|jsx|tsx|vue|go|rs)\b',
+        r'^(fix|implement|create|build|deploy|refactor|update|add|remove|delete|write|make|d\u00fczelt|yap|ekle|olu\u015ftur|sil|g\u00fcncelle)',
+        r'(bug|feature|issue|ticket|PR|pull request|merge|branch)',
+        r'(deploy|release|test|lint|build|compile)',
+    ]
+    is_chat = any(re.search(p, low) for p in _CHAT_PATTERNS)
+    is_task = any(re.search(p, low) for p in _TASK_PATTERNS)
+    if is_task and not is_chat:
+        return "task"
+    elif is_chat and not is_task:
+        return "chat"
+    elif is_chat and is_task:
+        return "task" if ("http" in low or re.search(r'\.\w{2,4}\b', low)) else "chat"
+    return "chat"
+
+@router.get("/classify-intent")
+def classify_intent(msg: str = ""):
+    """Classify message intent as 'task' or 'chat' using Claude haiku."""
+    text = msg.strip()
+    if not text:
+        return {"intent": "chat"}
+
+    # Check cache
+    with _intent_cache_lock:
+        if text in _intent_cache:
+            _intent_cache.move_to_end(text)
+            return {"intent": _intent_cache[text]}
+
+    # Try AI classification
+    try:
+        prompt = (
+            "Classify as 'task' or 'chat'. Reply with ONE word only. "
+            "Task = work request, bug fix, feature, implementation, code change. "
+            "Chat = question, greeting, status check, acknowledgment."
+        )
+        result = subprocess.run(
+            ["claude", "-p", f"{prompt}\n\nMessage: {text}",
+             "--model", "claude-haiku-4-5-20251001", "--max-turns", "1"],
+            capture_output=True, text=True, timeout=3
+        )
+        answer = result.stdout.strip().lower()
+        intent = "task" if "task" in answer else "chat"
+    except Exception:
+        intent = _heuristic_intent(text)
+
+    # Cache result
+    with _intent_cache_lock:
+        _intent_cache[text] = intent
+        while len(_intent_cache) > _INTENT_CACHE_MAX:
+            _intent_cache.popitem(last=False)
+
+    return {"intent": intent}
 
 # ── Register / CRUD ──
 @router.post("/agents/register")
