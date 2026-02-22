@@ -568,6 +568,17 @@ def reset_session():
         stop_signals.clear()
         agent_progress.clear()
         sessions.clear()
+        # Clear MCP cache (stale Jira/Figma/GitHub content from old sessions)
+        cache_registry.clear()
+        if CACHE_DIR:
+            import shutil
+            for f in os.listdir(CACHE_DIR):
+                fp = os.path.join(CACHE_DIR, f)
+                try:
+                    if os.path.isfile(fp):
+                        os.remove(fp)
+                except OSError:
+                    pass
         # Clear log buffers (old session logs)
         for name in log_buffers:
             log_buffers[name].clear()

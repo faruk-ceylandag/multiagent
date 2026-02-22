@@ -564,9 +564,12 @@ while True:
 
         ctx.current_task_id = None
         ctx.current_project = None
-        # Keep SESSION_ID across tasks so Claude CLI retains conversation history.
-        # Only reset if session is invalid (agent crash, etc.)
-        if ctx.SESSION_ID and not ctx.valid_sid(ctx.SESSION_ID):
+        # Architect/QA/reviewers: fresh session each task (independent tasks, no carry-over)
+        # Dev agents: keep session for multi-call conversation continuity
+        _fresh_session_roles = {"architect", "qa", "reviewer-logic", "reviewer-style", "reviewer-arch"}
+        if ctx.AGENT_NAME in _fresh_session_roles:
+            ctx.SESSION_ID = None
+        elif ctx.SESSION_ID and not ctx.valid_sid(ctx.SESSION_ID):
             ctx.SESSION_ID = None
         ctx.task_calls = 0
         ctx.session_tokens = 0
