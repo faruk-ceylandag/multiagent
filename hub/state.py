@@ -799,7 +799,9 @@ def _build_dashboard_data():
     now = datetime.now()
     # Quick copies to avoid RuntimeError during dict iteration
     # Filter hidden agents from dashboard display
-    agent_names = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
+    visible_names = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
+    hidden_names = [a for a in ALL_AGENTS if a in HIDDEN_AGENTS]
+    agent_names = visible_names + hidden_names
     msgs_snap = dict(messages)
     usage_snap = dict(usage_log)
     locks_snap = dict(file_locks)
@@ -833,6 +835,8 @@ def _build_dashboard_data():
             "progress": prog, "expertise": spec.get("score", 0),
             "cost": calc_agent_cost(n),
         }
+        if n in HIDDEN_AGENTS:
+            ai[n]["hidden"] = True
     # Analytics summary (real-time, no HTTP fetch needed)
     all_names = sorted((set(agent_names) | set(usage_snap.keys())) - HIDDEN_AGENTS)
     by_agent = {}

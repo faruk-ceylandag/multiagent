@@ -242,8 +242,12 @@ function selectAgent(name) {
 function renderSidebar(names) {
   const el = $('agentList');
   if (!el) return;
-  el.innerHTML = names.map(n => {
-    const a = (data.agents||{})[n]||{};
+  const agentsMap = data.agents||{};
+  const visibleNames = names.filter(n => !(agentsMap[n]||{}).hidden);
+  const hiddenNames = names.filter(n => (agentsMap[n]||{}).hidden);
+  function renderCard(n) {
+    const a = agentsMap[n]||{};
+    const isHidden = !!a.hidden;
     const ps = a.pipeline||'offline';
     const dot = ps==='working'?'working':ps==='booting'?'booting':ps==='verifying'?'verifying':
                 a.status==='rate_limited'?'rate-limited':a.status==='unresponsive'?'unresponsive':
@@ -256,21 +260,28 @@ function renderSidebar(names) {
     const exp = a.expertise?`<span class="agent-exp" title="Expertise">★${a.expertise}</span>`:'';
     const queueCount = (data.tasks||[]).filter(t=>t.assigned_to===n&&['created','assigned','in_progress'].includes(t.status)).length;
     const qBadge = queueCount?`<span class="queue-badge" title="${queueCount} task${queueCount>1?'s':''} in queue">${queueCount}</span>`:'';
-    return `<div class="agent-card${n===sel?' sel':''}" onclick="selectAgent('${escAttr(n)}')">
+    const actions = isHidden ? '' : `<div class="agent-actions">
+        <button onclick="event.stopPropagation();editAgent('${escAttr(n)}')" title="Edit">✎</button>
+        <button onclick="event.stopPropagation();stopAgent('${escAttr(n)}')" title="Stop">■</button>
+        <button onclick="event.stopPropagation();removeAgent('${escAttr(n)}')" title="Remove">✕</button>
+      </div>`;
+    return `<div class="agent-card${n===sel?' sel':''}${isHidden?' agent-hidden':''}" onclick="selectAgent('${escAttr(n)}')">
       <div class="agent-dot dot-${dot}"></div>
       <div style="flex:1;min-width:0">
         <div class="agent-name">${esc(n)} ${qBadge} ${rlB} ${exp} ${cost}</div>
         <div class="agent-meta">${a.calls||0} calls · ${tokCost}${formatCost(a.cost||0)}${a.silent_sec>60?' · '+formatAgo(a.silent_sec):''}</div>
         ${prog}
       </div>
-      <div class="agent-actions">
-        <button onclick="event.stopPropagation();editAgent('${escAttr(n)}')" title="Edit">✎</button>
-        <button onclick="event.stopPropagation();stopAgent('${escAttr(n)}')" title="Stop">■</button>
-        <button onclick="event.stopPropagation();removeAgent('${escAttr(n)}')" title="Remove">✕</button>
-      </div>
+      ${actions}
     </div>`;
-  }).join('') + `
-    <button class="add-agent-trigger" onclick="showAddAgentModal()">+ Add Agent</button>`;
+  }
+  let html = visibleNames.map(renderCard).join('');
+  html += `<button class="add-agent-trigger" onclick="showAddAgentModal()">+ Add Agent</button>`;
+  if (hiddenNames.length) {
+    html += '<div class="hidden-divider"></div>';
+    html += hiddenNames.map(renderCard).join('');
+  }
+  el.innerHTML = html;
 }
 
 function updateBadges() {
@@ -314,7 +325,9 @@ function updateTargetDropdown(names) {
   const dd = $('targetAgent');
   if (!dd) return;
   const cur = dd.value;
-  dd.innerHTML = names.map(n => `<option value="${escAttr(n)}"${n===cur?' selected':''}>${esc(n)}</option>`).join('');
+  const agentsMap = data.agents||{};
+  const visible = names.filter(n => !(agentsMap[n]||{}).hidden);
+  dd.innerHTML = visible.map(n => `<option value="${escAttr(n)}"${n===cur?' selected':''}>${esc(n)}</option>`).join('');
 }
 
 function toggleTheme() {
