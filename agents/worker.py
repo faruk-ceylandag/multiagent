@@ -591,7 +591,12 @@ while True:
                     ctx.current_task_id = str(result["id"])
                     log(ctx, f"📌 Task #{ctx.current_task_id} created in kanban")
 
-        if ctx.current_task_id:
+        # Reviewer/QA agents must NOT change the original task's status —
+        # they submit verdicts via /tasks/{tid}/review or set status via curl.
+        # Only dev agents (and architect for auto-created tasks) transition to in_progress.
+        _REVIEWER_QA_NAMES = {"reviewer-logic", "reviewer-style", "reviewer-arch", "qa"}
+        _is_reviewer_or_qa = ctx.AGENT_NAME in _REVIEWER_QA_NAMES
+        if ctx.current_task_id and not _is_reviewer_or_qa:
             update_task_status(ctx, ctx.current_task_id, "in_progress")
         ctx.reset_eco_tracking()
         _refresh_ecosystem(ctx)
@@ -1223,13 +1228,19 @@ RULES:
                 fail_reason = "Verification failed (tests/lint/build)"
             else:
                 fail_reason = ""
-            # Determine final status: dev agents go to code_review, others go to done
-            _SKIP_REVIEW_ROLES = {"architect", "qa", "reviewer-logic", "reviewer-style", "reviewer-arch"}
-            if task_ok and ctx.AGENT_NAME not in _SKIP_REVIEW_ROLES:
-                _final_status = "code_review"
+            # Reviewer/QA agents must NOT change the original task status —
+            # they submit verdicts via POST /tasks/{tid}/review or set status via curl.
+            # The hub manages the task lifecycle for reviewed/tested tasks.
+            if _is_reviewer_or_qa:
+                log(ctx, f"ℹ {ctx.AGENT_NAME}: review/QA complete, verdict submitted (not changing task status)")
             else:
-                _final_status = "done" if task_ok else "failed"
-            update_task_status(ctx, ctx.current_task_id, _final_status, detail=fail_reason)
+                # Dev agents go to code_review, architect goes to done
+                _SKIP_REVIEW_ROLES = {"architect"}
+                if task_ok and ctx.AGENT_NAME not in _SKIP_REVIEW_ROLES:
+                    _final_status = "code_review"
+                else:
+                    _final_status = "done" if task_ok else "failed"
+                update_task_status(ctx, ctx.current_task_id, _final_status, detail=fail_reason)
             hub_post(ctx, "/agents/specialization", {"agent_name": ctx.AGENT_NAME,
                 "task_type": ctx.current_project or "general", "success": task_ok})
 

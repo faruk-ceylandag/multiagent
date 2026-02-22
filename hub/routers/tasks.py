@@ -118,14 +118,12 @@ def update_task(tid: int, data: dict):
             allowed = VALID_TRANSITIONS.get(old_status, set())
             if allowed and new_status not in allowed:
                 return {"status": "error", "message": f"Invalid transition: {old_status} \u2192 {new_status}"}
-        tasks[tid].update(data)
-        # Cycle check on dependency update
+        # Validate dependencies BEFORE applying any changes
         new_deps = data.get("depends_on")
         if new_deps is not None:
             if _has_dependency_cycle(tid, new_deps, tasks):
-                # Rollback the dependency update
-                tasks[tid]["depends_on"] = []
                 return {"status": "error", "message": "Circular dependency detected"}
+        tasks[tid].update(data)
         new_status = tasks[tid].get("status", "")
         if new_status == "in_progress" and not tasks[tid].get("started_at"):
             tasks[tid]["started_at"] = datetime.now().isoformat()
@@ -239,7 +237,15 @@ def _dispatch_code_review(tid):
         return
 
     tid_str = str(tid)
-    reviewers = ["reviewer-logic", "reviewer-style", "reviewer-arch"]
+    reviewers = [r for r in ["reviewer-logic", "reviewer-style", "reviewer-arch"] if r in ALL_AGENTS]
+    if not reviewers:
+        # No reviewer agents available → auto-approve and skip to testing
+        task["status"] = "in_testing"
+        add_activity("system", task.get("assigned_to", "?"), "review_auto_approved",
+                     f"Code review #{tid} auto-approved (no reviewer agents)")
+        _dispatch_qa(tid)
+        bump_version()
+        return
 
     # Track rework loop count
     rework_count = task.get("_review_cycle", 0)
@@ -819,8 +825,8 @@ def submit_review(tid: int, data: dict):
         add_activity(agent, "code_review", "review_verdict",
                      f"#{tid} {verdict} by {agent}" + (f" ({len(review_comments)} comments)" if review_comments else ""))
 
-        # Check if all 3 reviewers have responded
-        reviewers = ["reviewer-logic", "reviewer-style", "reviewer-arch"]
+        # Check if all active reviewers have responded
+        reviewers = [r for r in ["reviewer-logic", "reviewer-style", "reviewer-arch"] if r in ALL_AGENTS]
         reviews = task_reviews.get(tid_str, {})
         all_responded = all(r in reviews for r in reviewers)
 
