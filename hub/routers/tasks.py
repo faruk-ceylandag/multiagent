@@ -1022,7 +1022,7 @@ def approve_plan(data: dict):
             "msg_type": "info", "timestamp": ts,
         })
 
-        # Auto-start: send task message to agents whose deps are already met
+        # Auto-start: activate tasks whose deps are already met
         for ct in created_tasks:
             task = tasks[ct["task_id"]]
             agent = task.get("assigned_to", "")
@@ -1031,8 +1031,11 @@ def approve_plan(data: dict):
             deps = task.get("depends_on", [])
             deps_met = all(tasks.get(d, {}).get("status") == "done" for d in deps)
             if deps_met:
+                # Transition to in_progress so agent picks it up immediately
+                task["status"] = "in_progress"
+                task["started_at"] = ts
                 messages.setdefault(agent, []).append({
-                    "sender": plan.get("created_by", "architect"),
+                    "sender": "user",
                     "receiver": agent,
                     "content": f"#{ct['task_id']} {task['description']}",
                     "msg_type": "task",
