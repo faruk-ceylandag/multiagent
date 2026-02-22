@@ -60,6 +60,7 @@ def send_message(msg: Message):
                 "created_by": msg.sender,
                 "created": ts,
                 "summary": msg.content[:500],
+                "task_id": entry.get("task_id", ""),
             }
             entry["plan_id"] = plan_id
             # Route to user inbox

@@ -1052,6 +1052,14 @@ def approve_plan(data: dict):
                     "timestamp": ts,
                 })
 
+        # Mark the architect's parent task as done — planning is complete
+        parent_tid = plan.get("task_id", "")
+        if parent_tid and str(parent_tid).isdigit():
+            ptid = int(parent_tid)
+            if ptid in tasks:
+                tasks[ptid]["status"] = "done"
+                tasks[ptid]["completed_at"] = ts
+
         bump_version()
         save_state()
 
@@ -1069,6 +1077,26 @@ def dismiss_plan(data: dict):
         return {"status": "error", "message": "plan not found"}
     with lock:
         pending_plans[plan_id]["status"] = "dismissed"
+        # Return parent task to to_do so it can be re-assigned
+        parent_tid = pending_plans[plan_id].get("task_id", "")
+        if parent_tid and str(parent_tid).isdigit():
+            tid = int(parent_tid)
+            if tid in tasks and tasks[tid].get("status") == "in_progress":
+                tasks[tid]["status"] = "to_do"
         bump_version()
         save_state()
     return {"status": "ok"}
+
+@router.get("/pending-plans")
+def get_pending_plans(creator: str = "", task_id: str = ""):
+    """Check for pending plans by creator and/or task_id."""
+    results = []
+    for pid, plan in pending_plans.items():
+        if plan.get("status") != "pending":
+            continue
+        if creator and plan.get("created_by") != creator:
+            continue
+        if task_id and str(plan.get("task_id", "")) != str(task_id):
+            continue
+        results.append({"plan_id": pid, "task_id": plan.get("task_id", ""), "created_by": plan.get("created_by", "")})
+    return results

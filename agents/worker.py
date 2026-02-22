@@ -1001,6 +1001,7 @@ PLAN PROPOSAL (send ONE curl with ALL steps):
 curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{
   "sender":"{{agent}}","receiver":"user","msg_type":"plan_proposal",
   "content":"Brief summary of the plan",
+  "task_id":"{{task_id}}",
   "plan_steps":[
     {"description":"FULL DESCRIPTION with ALL context, URLs, acceptance criteria. Agent knows NOTHING else.","assigned_to":"AGENT_NAME","priority":5,"depends_on_step":null,"task_external_id":"JIRA-123 or GH-45 or empty"},
     {"description":"FULL DESCRIPTION...","assigned_to":"AGENT_NAME","priority":5,"depends_on_step":0,"task_external_id":"same external ID"}
@@ -1081,6 +1082,7 @@ RULES:
                                  locked_files=lock_ctx,
                                  learned_patterns=learned_patterns_ctx,
                                  current_branch=current_branch or "", current_project=ctx.current_project or "",
+                                 task_id=ctx.current_task_id or "",
                                  contracts=f'=== CONTRACTS ===\n{contracts}' if contracts else '')
 
         # ── Auto-inject cached MCP content referenced in task ──
@@ -1243,6 +1245,15 @@ RULES:
                     _final_status = "code_review"
                 else:
                     _final_status = "done" if task_ok else "failed"
+                # Architect with pending plan → keep task in_progress (plan approve will set done)
+                if ctx.AGENT_NAME == "architect" and task_ok and ctx.current_task_id:
+                    try:
+                        _plans = hub_get(ctx, f"/pending-plans?creator={ctx.AGENT_NAME}&task_id={ctx.current_task_id}")
+                        if _plans and isinstance(_plans, list) and len(_plans) > 0:
+                            log(ctx, "📋 Plan proposal pending — task stays in_progress until approved")
+                            _final_status = "in_progress"
+                    except Exception:
+                        pass
                 update_task_status(ctx, ctx.current_task_id, _final_status, detail=fail_reason)
             hub_post(ctx, "/agents/specialization", {"agent_name": ctx.AGENT_NAME,
                 "task_type": ctx.current_project or "general", "success": task_ok})
