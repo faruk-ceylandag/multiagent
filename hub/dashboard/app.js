@@ -1159,6 +1159,10 @@ function renderInbox(p){
         if(m.msg_type==='plan_proposal'){
           const planId=m.plan_id;
           const steps=m.plan_steps||[];
+          // Check if plan was already approved/dismissed via pending_plans snapshot
+          const planState=(data.pending_plans||{})[planId];
+          const planStatus=planState?planState.status:'pending';
+          const isDone=planStatus!=='pending';
           const stepsHtml=steps.map((s,i)=>{
             const dep=s.depends_on_step!=null?`<span class="plan-dep">after step ${Number(s.depends_on_step)+1}</span>`:'';
             const assignee=s.assigned_to||'';
@@ -1167,21 +1171,23 @@ function renderInbox(p){
             const needsExpand=desc.length>120;
             return`<div class="plan-step" data-step="${i}">
               <div class="plan-step-header">
-                <label class="plan-step-check"><input type="checkbox" checked data-plan="${planId}" data-idx="${i}" onchange="togglePlanStep(this)"><span class="plan-step-num">${i+1}</span></label>
+                <label class="plan-step-check"><input type="checkbox" ${isDone?'disabled':'checked'} data-plan="${planId}" data-idx="${i}" onchange="togglePlanStep(this)"><span class="plan-step-num">${i+1}</span></label>
                 <div class="plan-step-meta">${assignee?`<span class="plan-agent-badge">${esc(assignee)}</span>`:''}${dep}</div>
               </div>
               <div class="plan-step-body">${needsExpand?`<span class="plan-desc-short">${shortDesc}</span><span class="plan-desc-full" style="display:none">${desc}</span> <button class="plan-expand-btn" onclick="this.previousElementSibling.style.display='inline';this.previousElementSibling.previousElementSibling.style.display='none';this.style.display='none'">Show more</button>`:desc}</div>
             </div>`;
           }).join('');
-          return`<div class="chat-bubble chat-bubble-agent plan-proposal-bubble">
+          const doneLabel=planStatus==='approved'?`<span style="font-size:11px;font-weight:600;color:var(--green)">Approved</span>`
+            :planStatus==='dismissed'?`<span style="font-size:11px;font-weight:600;color:var(--fg3)">Dismissed</span>`:'';
+          return`<div class="chat-bubble chat-bubble-agent plan-proposal-bubble"${isDone?' style="opacity:0.6"':''}>
             <div class="plan-header"><span class="plan-badge">Plan</span><span class="plan-title">${displayContent}</span></div>
             ${steps.length?`<div class="plan-steps">
-              <div class="plan-toolbar"><label class="plan-select-all"><input type="checkbox" checked onchange="toggleAllPlanSteps(this,${planId})"> Select all (${steps.length} steps)</label></div>
+              ${isDone?'':`<div class="plan-toolbar"><label class="plan-select-all"><input type="checkbox" checked onchange="toggleAllPlanSteps(this,${planId})"> Select all (${steps.length} steps)</label></div>`}
               ${stepsHtml}
             </div>
             <div class="plan-actions">
-              <button class="plan-btn plan-btn-approve" onclick="approvePlan(${planId})">Approve Selected</button>
-              <button class="plan-btn plan-btn-dismiss" onclick="dismissPlan(${planId})">Dismiss</button>
+              ${isDone?doneLabel:`<button class="plan-btn plan-btn-approve" onclick="approvePlan(${planId})">Approve Selected</button>
+              <button class="plan-btn plan-btn-dismiss" onclick="dismissPlan(${planId})">Dismiss</button>`}
             </div>`:''}
             <div class="bubble-meta">${m.sender||'architect'} · ${timeStr}</div></div>`;
         }

@@ -1261,10 +1261,23 @@ RULES:
                         task_title = td.get("description", "")
                 if not task_title:
                     task_title = msgs[0].get("content", "")
-                # Clean title: remove [...] prefixes, task IDs, URLs
+                # Clean title: first line only, strip prompt/role artifacts
+                task_title = task_title.split("\n")[0]
                 task_title = re.sub(r'\[.*?\]\s*', '', task_title)
                 task_title = re.sub(r'^#\d+\s*', '', task_title)
-                task_title = re.sub(r'https?://\S+\s*', '', task_title).strip()
+                task_title = re.sub(r'https?://\S+\s*', '', task_title)
+                # Strip role/prompt text that may leak into task descriptions
+                task_title = re.sub(r'^You are \w+[\s—–\-].*$', '', task_title)
+                task_title = re.sub(r'(?:ROLE|TASK|MESSAGES|RULES|CONTRACTS)[:\s].*', '', task_title, flags=re.IGNORECASE)
+                task_title = task_title.strip()
+                if not task_title or len(task_title) < 5:
+                    # Last resort: scan messages for first user/system content
+                    for _m in msgs:
+                        _mc = _m.get("content", "").split("\n")[0].strip()
+                        _mc = re.sub(r'^#\d+\s*', '', _mc).strip()
+                        if _mc and len(_mc) > 5 and not _mc.startswith("You are"):
+                            task_title = _mc[:80]
+                            break
                 task_title = task_title[:80]
                 # Build: branch-ref | title (preferred) or TASK-ID | title
                 if cur_br and cur_br.startswith("feature/"):
