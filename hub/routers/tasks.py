@@ -7,7 +7,7 @@ from fastapi import APIRouter
 from hub.state import (
     lock, tasks, agents, pipeline, ALL_AGENTS, TASK_STATES, VALID_TRANSITIONS,
     analytics_log, MAX_ANALYTICS, add_activity, save_state, send_notification,
-    messages, bump_version, pending_plans, logger,
+    messages, bump_version, pending_plans, logger, file_locks,
     task_comments, task_reviews, HIDDEN_AGENTS, STATUS_MIGRATION, MAX_REWORK_LOOPS,
 )
 
@@ -164,6 +164,12 @@ def update_task(tid: int, data: dict):
             from hub.state import add_audit
             add_audit(tasks[tid].get("assigned_to", "system"), "task_update",
                       {"task_id": tid, "old_status": old_status, "new_status": new_status})
+
+        # Release file locks held by this task when it reaches a terminal state
+        if new_status in ("done", "failed", "cancelled") and old_status != new_status:
+            for path in list(file_locks.keys()):
+                if file_locks[path].get("task_id") == tid:
+                    del file_locks[path]
 
         # Cancel active review subtasks when parent is cancelled/failed
         if new_status in ("cancelled", "failed") and old_status != new_status:
@@ -979,6 +985,13 @@ def uat_decision(tid: int, data: dict):
                     "msg_type": "uat_feedback", "task_id": str(tid),
                     "timestamp": ts,
                 })
+            # Reset QA tasks that depend on this task back to to_do
+            for other_tid, other_task in tasks.items():
+                if (other_task.get("assigned_to") in {a for a in ALL_AGENTS if _is_qa_agent(a)}
+                        and tid in (other_task.get("depends_on") or [])
+                        and other_task.get("status") == "done"):
+                    other_task["status"] = "to_do"
+                    other_task.pop("completed_at", None)
             add_activity("user", dev_agent or "?", "uat_rejected",
                          f"UAT #{tid} rejected: {feedback[:80]}")
 

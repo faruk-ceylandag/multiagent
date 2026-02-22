@@ -68,7 +68,7 @@ class CostEntry(BaseModel):
     agent_name: str; tokens_in: int = 0; tokens_out: int = 0; model: str = ""
 
 class FileLock(BaseModel):
-    file_path: str; agent_name: str
+    file_path: str; agent_name: str; task_id: int | None = None
 
 # ── State ──
 messages: Dict[str, List[dict]] = {}

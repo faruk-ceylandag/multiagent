@@ -259,7 +259,8 @@ def lock_file(fl: FileLock):
     with lock:
         if fl.file_path in file_locks and file_locks[fl.file_path]["agent"] != fl.agent_name:
             return {"status": "locked", "by": file_locks[fl.file_path]["agent"]}
-        file_locks[fl.file_path] = {"agent": fl.agent_name, "since": datetime.now().isoformat()}
+        file_locks[fl.file_path] = {"agent": fl.agent_name, "since": datetime.now().isoformat(),
+                                     "task_id": fl.task_id}
     return {"status": "ok"}
 
 @router.post("/files/unlock")

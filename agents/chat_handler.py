@@ -46,7 +46,7 @@ RULES:
                 except Exception:
                     reply = "Working on it, I'll respond shortly."
                 hub_msg(ctx, sender, reply, "chat")
-                log(ctx, f"\U0001f4ac Replied: {reply[:80]}")
+                log(ctx, f"\U0001f4ac Replied: {reply}")
         except Exception:
             pass
 

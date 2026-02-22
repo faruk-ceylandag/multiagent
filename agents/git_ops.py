@@ -20,7 +20,10 @@ def git_add_safe(ctx, cwd):
 # ── File Locking ──
 
 def lock_file(ctx, path):
-    r = hub_post(ctx, "/files/lock", {"file_path": path, "agent_name": ctx.AGENT_NAME})
+    payload = {"file_path": path, "agent_name": ctx.AGENT_NAME}
+    if ctx.current_task_id:
+        payload["task_id"] = ctx.current_task_id
+    r = hub_post(ctx, "/files/lock", payload)
     if r and r.get("status") == "ok":
         ctx._locked_files.add(path)
         return True

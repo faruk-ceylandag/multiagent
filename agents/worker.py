@@ -667,8 +667,8 @@ while True:
         _is_reviewer_or_qa = ctx.AGENT_NAME in _REVIEWER_QA_NAMES
         if ctx.current_task_id and not _is_reviewer_or_qa:
             update_task_status(ctx, ctx.current_task_id, "in_progress")
-        elif ctx.current_task_id and ctx.AGENT_NAME.startswith("reviewer-") and ctx._review_parent_id:
-            # Reviewer: set own subtask to in_progress (not the parent)
+        elif ctx.current_task_id and (ctx.AGENT_NAME.startswith("reviewer-") or ctx.AGENT_NAME in {"qa"}):
+            # Reviewer/QA: set own task to in_progress
             update_task_status(ctx, ctx.current_task_id, "in_progress")
         ctx.reset_eco_tracking()
         _refresh_ecosystem(ctx)
@@ -1301,7 +1301,8 @@ RULES:
                         "task_id": ctx.current_task_id or "",
                     })
 
-        unlock_all(ctx)
+        # Lock cleanup deferred — released after status is determined (skip for code_review)
+        _skip_unlock = False
         # Resource cleanup
         ctx.session_tokens = 0
         ctx.task_calls = 0
@@ -1348,9 +1349,13 @@ RULES:
                         _sub_status = "done" if (verdict == "approve" or not verdict) else "failed"
                         update_task_status(ctx, ctx.current_task_id, _sub_status)
                 elif ctx.AGENT_NAME == "qa" or any(h in ctx.AGENT_NAME.lower() for h in ("qa", "test", "quality")):
-                    # QA agent: parse pass/fail from output, update task status
-                    _final_status = "uat" if task_ok else "failed"
-                    update_task_status(ctx, ctx.current_task_id, _final_status,
+                    # QA agent: update parent task status + mark own task done
+                    _parent_status = "uat" if task_ok else "failed"
+                    _parent_id = ctx._review_parent_id or ctx.current_task_id
+                    if _parent_id and _parent_id != ctx.current_task_id:
+                        update_task_status(ctx, _parent_id, _parent_status,
+                                           detail="" if task_ok else "QA tests failed")
+                    update_task_status(ctx, ctx.current_task_id, "done" if task_ok else "failed",
                                        detail="" if task_ok else "QA tests failed")
                     log(ctx, f"📝 QA result: {'pass → uat' if task_ok else 'fail'}")
                 else:
@@ -1360,6 +1365,7 @@ RULES:
                 _SKIP_REVIEW_ROLES = {"architect"}
                 if task_ok and ctx.AGENT_NAME not in _SKIP_REVIEW_ROLES:
                     _final_status = "code_review"
+                    _skip_unlock = True
                 else:
                     _final_status = "done" if task_ok else "failed"
                 # Architect with pending plan → keep task in_progress (plan approve will set done)
@@ -1374,6 +1380,9 @@ RULES:
                 update_task_status(ctx, ctx.current_task_id, _final_status, detail=fail_reason)
             hub_post(ctx, "/agents/specialization", {"agent_name": ctx.AGENT_NAME,
                 "task_type": ctx.current_project or "general", "success": task_ok})
+
+        if not _skip_unlock:
+            unlock_all(ctx)
 
         if is_task:
             run_hook(ctx, "post-task", {"success": task_ok, "project": ctx.current_project or ""})

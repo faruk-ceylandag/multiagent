@@ -541,7 +541,38 @@ function appendLogLines(lines){
   // Remove typing indicator before appending new lines
   const typing=el.querySelector('.log-typing');
   if(typing)typing.remove();
-  for(const l of f){const d=document.createElement('div');d.innerHTML=colorize(l);el.appendChild(d);}
+  for(const l of f){
+    if(_reCallStart.test(l)){
+      // Close previous open call block if any
+      const prev=el.querySelector('details.call-block[open]:last-of-type');
+      if(prev&&!prev.querySelector('[data-closed]')){
+        prev.removeAttribute('open');
+        const sm=prev.querySelector('summary .call-block-meta');
+        if(sm){const tc=prev.querySelectorAll('.call-block-body .tool').length;sm.textContent=`✓ ${tc} tool${tc!==1?'s':''}`;}
+      }
+      const det=document.createElement('details');det.className='call-block';det.open=true;
+      const hdrHtml=colorize(l).replace(/<hr[^>]*>/g,'').replace(/<\/?div[^>]*>/g,'');
+      const sm=document.createElement('summary');sm.innerHTML=`${hdrHtml}<span class="call-block-meta">⋯</span>`;
+      const body=document.createElement('div');body.className='call-block-body';
+      det.appendChild(sm);det.appendChild(body);el.appendChild(det);
+    } else if(_reExitCode.test(l)){
+      const open=el.querySelector('details.call-block[open]:last-of-type');
+      if(open){
+        const body=open.querySelector('.call-block-body');
+        const d=document.createElement('div');d.innerHTML=colorize(l);d.setAttribute('data-closed','1');body.appendChild(d);
+        open.removeAttribute('open');
+        const sm=open.querySelector('summary .call-block-meta');
+        if(sm){const tc=body.querySelectorAll('.tool').length;const ok=l.match(/exit=0/);
+          const tokLine=[...body.children].map(c=>c.textContent).find(t=>t.includes('tokens:')&&t.includes('in/'));
+          const tokBit=tokLine?` · ${tokLine.replace(/.*?([\d,]+in\/[\d,]+out).*/,'$1')}`:'';
+          sm.textContent=`${ok?'✓':'✗'} ${tc} tool${tc!==1?'s':''}${tokBit}`;}
+      } else {const d=document.createElement('div');d.innerHTML=colorize(l);el.appendChild(d);}
+    } else {
+      const open=el.querySelector('details.call-block[open]:last-of-type');
+      if(open){const body=open.querySelector('.call-block-body');const d=document.createElement('div');d.innerHTML=colorize(l);body.appendChild(d);}
+      else{const d=document.createElement('div');d.innerHTML=colorize(l);el.appendChild(d);}
+    }
+  }
   // Re-add typing indicator if agent is working
   const agentInfo=(data.agents||{})[sel]||{};
   if(agentInfo.pipeline==='working'){
@@ -549,6 +580,36 @@ function appendLogLines(lines){
   }
   while(el.children.length>3000)el.removeChild(el.firstChild);
   if(atBot)el.scrollTop=el.scrollHeight;
+}
+// ── Call grouping: collapse ▶...◼ blocks ──
+function buildGroupedHtml(lines){
+  let html='',buf=[],hdr='';
+  for(const l of lines){
+    if(_reCallStart.test(l)){
+      if(buf.length) html+=_flushCallBlock(hdr,buf,true);
+      hdr=l; buf=[];
+    } else if(hdr && _reExitCode.test(l)){
+      buf.push(l); html+=_flushCallBlock(hdr,buf,false); hdr=''; buf=[];
+    } else if(hdr){
+      buf.push(l);
+    } else {
+      html+=`<div>${colorize(l)}</div>`;
+    }
+  }
+  if(buf.length||hdr) html+=_flushCallBlock(hdr,buf,true);
+  return html;
+}
+function _flushCallBlock(hdr,lines,isOpen){
+  const exitLine=lines.find(l=>_reExitCode.test(l));
+  const tools=lines.filter(l=>l.includes('🔧')).length;
+  const tokLine=lines.find(l=>l.includes('tokens:')&&l.includes('in/'));
+  const tokBit=tokLine?` · ${tokLine.replace(/.*?([\d,]+in\/[\d,]+out).*/,'$1')}`:'';
+  const exitBit=exitLine?(exitLine.match(/exit=0/)?'✓':'✗'):'⋯';
+  // Strip hr/div wrapper from colorize for clean summary
+  const hdrHtml=colorize(hdr).replace(/<hr[^>]*>/g,'').replace(/<\/?div[^>]*>/g,'');
+  const summary=`${hdrHtml}<span class="call-block-meta">${exitBit} ${tools} tool${tools!==1?'s':''}${tokBit}</span>`;
+  const inner=lines.map(l=>`<div>${colorize(l)}</div>`).join('');
+  return`<details class="call-block"${isOpen?' open':''}><summary>${summary}</summary><div class="call-block-body">${inner}</div></details>`;
 }
 // Cached regex patterns for colorize() — avoids re-creating on every call
 const _reUserPrompt = /^[\s]*📨\s*/;
@@ -579,6 +640,21 @@ function colorize(line){
   // Token counts
   if(line.includes('tokens:')&&(line.includes('in/')&&line.includes('out')))
     return`<span class="log-tokens">${esc(line)}</span>`;
+  // Chat reply — collapsible
+  if(line.includes('💬') && line.includes('Replied: ')){
+    const parts=line.split('Replied: ');
+    const body=parts.slice(1).join('Replied: ');
+    const preview=body.substring(0,80)+(body.length>80?'…':'');
+    return`<details class="chat-reply-block"><summary class="text-stream">💬 ${esc(preview)}</summary><div class="chat-reply-body">${esc(body)}</div></details>`;
+  }
+  // Chat incoming — collapsible
+  if(line.includes('💬') && line.includes('Chat from ')){
+    const parts=line.split(': ');
+    const header=parts[0];
+    const body=parts.slice(1).join(': ');
+    const preview=body.substring(0,80)+(body.length>80?'…':'');
+    return`<details class="chat-reply-block"><summary class="text-stream">${esc(header)}: ${esc(preview)}</summary><div class="chat-reply-body">${esc(body)}</div></details>`;
+  }
   // Text streaming (Claude output)
   if(line.includes('💬'))
     return`<span class="text-stream">${esc(line.replace(_reTextStream,''))}</span>`;
@@ -709,7 +785,8 @@ function renderLogs(p){
       btn.onclick=()=>{btn.remove();const older=f.slice(0,-LOG_VISIBLE);older.forEach(l=>{const d=document.createElement('div');d.innerHTML=colorize(l);la.prepend(d);});};
       frag.appendChild(btn);
     }
-    visibleLines.forEach(l=>{const d=document.createElement('div');d.innerHTML=colorize(l);frag.appendChild(d);});
+    const grouped=document.createElement('div');grouped.innerHTML=buildGroupedHtml(visibleLines);
+    while(grouped.firstChild)frag.appendChild(grouped.firstChild);
     if(isWorking){const d=document.createElement('div');d.className='log-typing';d.textContent='● agent is working...';frag.appendChild(d);}
     la.appendChild(frag);
     la.scrollTop=la.scrollHeight;
