@@ -1973,8 +1973,8 @@ async function sendCmd(){
     };
     const taskResult=await(await fetch(HUB+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(taskPayload)})).json();
     const taskId=taskResult?.id;
-    // Extract ticket ID from URLs (Jira, Linear, GitHub, Sentry) before falling back to TASK-{n}
-    let taskExternalId=taskId?'TASK-'+taskId:'TASK-0';
+    // Extract ticket ID from URLs (Jira, Linear, GitHub, Sentry) — no branch if no real ticket
+    let taskExternalId='';
     const jiraM=text.match(/atlassian\.net\/browse\/([A-Z]{2,10}-\d+)/);
     const linearM=!jiraM&&text.match(/linear\.app\/[^/]+\/issue\/([A-Z]+-\d+)/);
     const ghM=!jiraM&&!linearM&&text.match(/github\.com\/[^/]+\/[^/]+\/(?:issues|pull)\/(\d+)/);
@@ -1986,8 +1986,8 @@ async function sendCmd(){
     else if(sentryM)taskExternalId='SENTRY-'+sentryM[1];
     else if(genericJiraM)taskExternalId=genericJiraM[1];
 
-    // Update task with external ID
-    if(taskId) fetch(HUB+'/tasks/'+taskId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_external_id:taskExternalId})});
+    // Update task with external ID only if a real ticket was found
+    if(taskId&&taskExternalId) fetch(HUB+'/tasks/'+taskId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_external_id:taskExternalId})});
 
     const msgPayload={
       sender:'user',receiver:target,content:text,msg_type:'task',
