@@ -1158,20 +1158,28 @@ function renderInbox(p){
           const planId=m.plan_id;
           const steps=m.plan_steps||[];
           const stepsHtml=steps.map((s,i)=>{
-            const dep=s.depends_on_step!=null?` <span style="opacity:0.5;font-size:10px">(after step ${Number(s.depends_on_step)+1})</span>`:'';
-            const assignee=s.assigned_to?` → <strong>${esc(s.assigned_to)}</strong>`:'';
-            return`<div class="plan-step" data-step="${i}"><label><input type="checkbox" checked data-plan="${planId}" data-idx="${i}" onchange="togglePlanStep(this)"> <strong>${i+1}.</strong> ${esc(s.description.substring(0,200))}${assignee}${dep}</label></div>`;
+            const dep=s.depends_on_step!=null?`<span class="plan-dep">after step ${Number(s.depends_on_step)+1}</span>`:'';
+            const assignee=s.assigned_to||'';
+            const desc=esc(s.description||'');
+            const shortDesc=desc.length>120?desc.substring(0,120)+'…':'';
+            const needsExpand=desc.length>120;
+            return`<div class="plan-step" data-step="${i}">
+              <div class="plan-step-header">
+                <label class="plan-step-check"><input type="checkbox" checked data-plan="${planId}" data-idx="${i}" onchange="togglePlanStep(this)"><span class="plan-step-num">${i+1}</span></label>
+                <div class="plan-step-meta">${assignee?`<span class="plan-agent-badge">${esc(assignee)}</span>`:''}${dep}</div>
+              </div>
+              <div class="plan-step-body">${needsExpand?`<span class="plan-desc-short">${shortDesc}</span><span class="plan-desc-full" style="display:none">${desc}</span> <button class="plan-expand-btn" onclick="this.previousElementSibling.style.display='inline';this.previousElementSibling.previousElementSibling.style.display='none';this.style.display='none'">Show more</button>`:desc}</div>
+            </div>`;
           }).join('');
           return`<div class="chat-bubble chat-bubble-agent plan-proposal-bubble">
-            <span class="bubble-type" style="background:var(--ac);color:#fff">plan</span>
-            <div style="margin:4px 0 6px">${displayContent}</div>
+            <div class="plan-header"><span class="plan-badge">Plan</span><span class="plan-title">${displayContent}</span></div>
             ${steps.length?`<div class="plan-steps">
-              <label class="plan-select-all" style="margin-bottom:4px;font-size:10px"><input type="checkbox" checked onchange="toggleAllPlanSteps(this,${planId})"> Select all</label>
+              <div class="plan-toolbar"><label class="plan-select-all"><input type="checkbox" checked onchange="toggleAllPlanSteps(this,${planId})"> Select all (${steps.length} steps)</label></div>
               ${stepsHtml}
             </div>
-            <div style="margin-top:8px;display:flex;gap:6px">
-              <button class="btn-sm" style="background:var(--green);color:#000" onclick="approvePlan(${planId})">Approve Selected</button>
-              <button class="btn-sm btn-ghost" onclick="dismissPlan(${planId})">Dismiss</button>
+            <div class="plan-actions">
+              <button class="plan-btn plan-btn-approve" onclick="approvePlan(${planId})">Approve Selected</button>
+              <button class="plan-btn plan-btn-dismiss" onclick="dismissPlan(${planId})">Dismiss</button>
             </div>`:''}
             <div class="bubble-meta">${m.sender||'architect'} · ${timeStr}</div></div>`;
         }
@@ -2079,30 +2087,40 @@ function toggleAllPlanSteps(masterCb,planId){
     togglePlanStep(cb);
   });
 }
+function _markPlanDone(bubble, label, color){
+  const actions=bubble.querySelector('.plan-actions');
+  if(actions) actions.innerHTML=`<span style="font-size:11px;font-weight:600;color:${color}">${label}</span>`;
+  bubble.querySelectorAll('.plan-step-check input').forEach(cb=>{cb.disabled=true;});
+  bubble.querySelector('.plan-select-all')?.remove();
+  bubble.style.opacity='0.6';
+}
 async function approvePlan(planId){
   const bubble=document.querySelector(`.plan-proposal-bubble input[data-plan="${planId}"]`)?.closest('.plan-proposal-bubble');
   if(!bubble){toast('Plan bubble not found','error');return;}
   const selected=[];
   bubble.querySelectorAll(`input[data-plan="${planId}"]:checked`).forEach(cb=>selected.push(Number(cb.dataset.idx)));
   if(!selected.length){toast('Select at least one step','warn');return;}
+  bubble.querySelectorAll('.plan-btn').forEach(b=>b.disabled=true);
   try{
     const r=await(await fetch(HUB+'/plan/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan_id:planId,selected_steps:selected})})).json();
     if(r.status==='ok'){
-      toast(`Plan #${planId} approved — ${r.tasks_created.length} task(s) created`,'success',4000);
-      bubble.querySelectorAll('button').forEach(b=>b.disabled=true);
-      bubble.style.opacity='0.5';
+      toast(`Plan approved — ${r.tasks_created.length} task(s) created`,'success',4000);
+      _markPlanDone(bubble, `Approved — ${r.tasks_created.length} task(s) created`, 'var(--green)');
       setTimeout(()=>{poll();fetchInbox();},500);
-    } else toast('Error: '+(r.message||'unknown'),'error');
-  }catch(e){toast('Error: '+e,'error');}
+    } else {
+      toast('Error: '+(r.message||'unknown'),'error');
+      bubble.querySelectorAll('.plan-btn').forEach(b=>b.disabled=false);
+    }
+  }catch(e){toast('Error: '+e,'error');bubble.querySelectorAll('.plan-btn').forEach(b=>b.disabled=false);}
 }
 async function dismissPlan(planId){
   if(!confirm('Dismiss this plan?'))return;
   try{
     const r=await(await fetch(HUB+'/plan/dismiss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan_id:planId})})).json();
     if(r.status==='ok'){
-      toast(`Plan #${planId} dismissed`,'info',3000);
+      toast('Plan dismissed','info',3000);
       const bubble=document.querySelector(`.plan-proposal-bubble input[data-plan="${planId}"]`)?.closest('.plan-proposal-bubble');
-      if(bubble){bubble.querySelectorAll('button').forEach(b=>b.disabled=true);bubble.style.opacity='0.5';}
+      if(bubble) _markPlanDone(bubble, 'Dismissed', 'var(--fg3)');
       setTimeout(fetchInbox,500);
     } else toast('Error: '+(r.message||'unknown'),'error');
   }catch(e){toast('Error: '+e,'error');}
