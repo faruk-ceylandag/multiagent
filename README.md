@@ -20,9 +20,23 @@ Dashboard opens at `http://localhost:{HUB_PORT}`. Send tasks from the chat bar, 
 1. **You type a task** — plain language, a Jira link, a Figma URL, whatever you want done
 2. **Architect** reads and breaks it into subtasks, delegates to the right agents
 3. **Frontend & Backend** implement the code in parallel, each on their own branch
-4. **QA** runs tests and linters automatically — agents iterate until everything passes
-5. **Reviewer** checks quality and security
-6. **You approve & commit** from the dashboard when you're happy
+4. **Code Review** — 3 hidden reviewer agents (Logic, Style, Architecture) auto-review in parallel. All 3 must approve.
+5. **QA** runs tests and linters automatically — agents iterate until everything passes
+6. **UAT** — you approve or reject from the dashboard with feedback
+7. **Done** — task is complete
+
+### Task Pipeline
+
+```
+to_do → in_progress → code_review → in_testing → uat → done
+                ↑          |              |         |
+                └──────────┘──────────────┘─────────┘  (rework on reject)
+```
+
+- **Code Review**: 3 haiku-model reviewers run in parallel (cheap + fast). If any requests changes, task goes back to dev with specific comments. Max 3 rework cycles before auto-approve.
+- **QA**: Automated testing after all reviewers approve.
+- **UAT**: You get approve/reject buttons in the dashboard. Reject sends feedback to the dev.
+- **Review timeout**: If a reviewer doesn't respond in 15 minutes, auto-approve.
 
 Each agent runs Claude Code CLI under the hood — Sonnet for thinking, Opus for coding.
 
@@ -31,9 +45,10 @@ Each agent runs Claude Code CLI under the hood — Sonnet for thinking, Opus for
 Real-time web UI with everything in one place:
 
 - **Logs** — live stream of what each agent is doing
-- **Tasks** — kanban board with drag-and-drop, dependency chains, priorities
+- **Tasks** — 7-column kanban board (To Do → In Progress → Code Review → Testing → UAT → Done / Failed)
 - **Inbox** — agent messages, review requests, chat with individual agents
-- **Code Review** — see diffs, approve and commit directly
+- **Code Review** — review verdicts, comment threads, resolve/unresolve per issue
+- **UAT** — approve/reject with feedback directly from task detail modal
 - **Git** — branch status, changed files per project
 - **Analytics** — cost tracking, token usage, budget limits per agent
 
@@ -74,7 +89,10 @@ Create `multiagent.json` in your project root:
     {"name": "architect"},
     {"name": "frontend"},
     {"name": "backend"},
-    {"name": "qa"}
+    {"name": "qa"},
+    {"name": "reviewer-logic", "model": "haiku", "hidden": true},
+    {"name": "reviewer-style", "model": "haiku", "hidden": true},
+    {"name": "reviewer-arch", "model": "haiku", "hidden": true}
   ],
   "coding_model": "claude-opus-4-6",
   "thinking_model": "claude-sonnet-4-5-20250929",
@@ -83,7 +101,9 @@ Create `multiagent.json` in your project root:
 }
 ```
 
-Add/remove agents from the dashboard or config. Change models, set budget caps per agent. Config hot-reloads — no restart needed.
+- **Hidden agents** (`"hidden": true`): Run in the background, invisible on dashboard. Used for automated code review.
+- **Model shorthand**: `"haiku"`, `"sonnet"`, `"opus"` resolve to full model IDs automatically.
+- Config hot-reloads every 15s — no restart needed.
 
 ## CLI
 

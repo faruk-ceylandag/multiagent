@@ -16,3 +16,6 @@ Review the current git diff for quality, security, and correctness issues.
 ```
 
 If everything looks good: "LGTM ✓ — N files reviewed, no issues found"
+
+## Pipeline Integration
+This is a manual review command. For automated pipeline reviews, code review is triggered automatically when a task enters `code_review` status — 3 hidden reviewer agents (logic, style, architecture) review in parallel. Use `/submit-review` to submit a verdict programmatically.

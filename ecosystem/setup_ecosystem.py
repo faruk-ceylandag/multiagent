@@ -225,8 +225,17 @@ def get_smart_hints(task_content, project_name=None, ma_dir="", hub_url="", role
             rules.append("REQUIRED: Execute project test commands (npm test, pytest, etc.) and report results.")
     elif role in ("frontend", "backend"):
         rules.append("REQUIRED: Run tests after making changes. Lock files before editing.")
+        rules.append("REQUIRED: After work is done, set task to code_review (NOT done). Reviewers auto-dispatch.")
         if any(k in low for k in ["write test", "add test", "test coverage"]):
             rules.append("REQUIRED: Use @test-writer subagent for comprehensive test generation.")
+    elif role.startswith("reviewer-"):
+        rules.append("REQUIRED: Review diff, then POST /tasks/{tid}/review with verdict and comments. Use /submit-review command.")
+        if "logic" in role:
+            rules.append("FOCUS: Logic correctness, bugs, edge cases, null checks, race conditions.")
+        elif "style" in role:
+            rules.append("FOCUS: Naming, formatting, readability, DRY, code duplication.")
+        elif "arch" in role:
+            rules.append("FOCUS: Design patterns, separation of concerns, scalability, SOLID principles.")
 
     # ── MCP: only if task keywords match ──
     if any(k in low for k in ["documentation", "docs", "api reference", "how to use",
@@ -266,6 +275,24 @@ def get_smart_hints(task_content, project_name=None, ma_dir="", hub_url="", role
                                "review for security", "quality check", "vulnerability scan",
                                "peer review"]):
         hints.append("REQUIRED: Use @code-reviewer subagent for quality + security review.")
+
+    # ── Code Review Pipeline (reviewer agents) ──
+    if any(k in low for k in ["review_request", "review request", "code_review"]):
+        rules.append("REQUIRED: Review the diff, then POST /tasks/{tid}/review with verdict='approve' or 'request_changes' and comments list.")
+        rules.append("REQUIRED: Each comment must have: file, line (optional), description, severity (critical/warning/info).")
+
+    # ── Rework from review feedback ──
+    if any(k in low for k in ["review_feedback", "request_changes", "reviewer comment",
+                               "fix review", "address review", "rework"]):
+        hints.append("TIP: Read review comments from task, fix each issue, then set status to code_review to trigger re-review.")
+
+    # ── QA after review approval ──
+    if any(k in low for k in ["qa_request", "qa request", "in_testing"]):
+        rules.append("REQUIRED: Run ALL test suites. If tests pass, set status to 'uat'. If tests fail, set status to 'in_progress' with failure details.")
+
+    # ── UAT ──
+    if any(k in low for k in ["uat", "user acceptance", "user_approval"]):
+        hints.append("TIP: UAT decisions are made by the user from the dashboard. Use POST /tasks/{tid}/uat with action='approve' or 'reject'.")
 
     if any(k in low for k in ["query", "database", "sql ", "select ", "table ",
                                "db migration", "schema change", "add column"]):

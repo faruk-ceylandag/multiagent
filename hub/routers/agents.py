@@ -126,7 +126,7 @@ def detect_route(msg: str = ""):
             scores[a] = scores.get(a, 0) - 3  # penalize offline
         # Penalize agents with large task queues
         agent_tasks = sum(1 for t in tasks.values()
-                         if t.get("assigned_to") == a and t.get("status") in ("created", "assigned", "in_progress"))
+                         if t.get("assigned_to") == a and t.get("status") in ("to_do", "created", "assigned", "in_progress"))
         if agent_tasks >= 3:
             scores[a] = scores.get(a, 0) - 2
 

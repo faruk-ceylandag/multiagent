@@ -162,6 +162,15 @@ def generate_claude_md(project_name, stack_info):
             lines.append(f"{c}  # Build")
         lines.append("```\n")
 
+    # Task lifecycle
+    lines.append("""## Task Lifecycle
+Tasks follow: `to_do → in_progress → code_review → in_testing → uat → done`
+- After finishing work, set status to `code_review` (NOT `done`) — reviewers auto-dispatch
+- 3 reviewers must all approve before QA runs
+- If reviewers request changes, task returns to `in_progress` with comments — fix and re-submit
+- After QA passes, user does UAT from dashboard
+""")
+
     # Common rules
     lines.append("""## Rules for AI Agents
 - ALWAYS `cd` into this project directory before any work

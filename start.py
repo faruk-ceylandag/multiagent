@@ -307,9 +307,17 @@ python = sys.executable
 workers = {}
 BOOT_STAGGER = cfg.get("boot_stagger", 1)  # seconds between agent boots (no API call at boot, so minimal stagger)
 
+_MODEL_ALIASES = {
+    "haiku": "claude-haiku-4-5-20251001",
+    "sonnet": "claude-sonnet-4-5-20250929",
+    "opus": "claude-opus-4-6",
+}
+
 def launch_worker(agent_cfg):
     name = agent_cfg["name"] if isinstance(agent_cfg, dict) else agent_cfg
     model = agent_cfg.get("model", "") if isinstance(agent_cfg, dict) else ""
+    # Resolve model aliases
+    model = _MODEL_ALIASES.get(model, model)
     role_file = os.path.join(MA_DIR, f"{name}-role.md")
     log_fh = open(os.path.join(MA_DIR, "logs", f"{name}.log"), "a")
     cmd = [python, "-m", "agents.worker", name, role_file, MA_DIR, HUB_URL, WORKSPACE]

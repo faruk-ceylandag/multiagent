@@ -27,13 +27,14 @@ else
 fi
 echo -e "${G}✓ Source: $SRC${NC}"
 
-for d in hub/routers hub/dashboard agents lib ecosystem/mcp ecosystem/hooks ecosystem/templates ecosystem/subagents ecosystem/commands; do mkdir -p "$INSTALL_DIR/$d"; done
+for d in hub/routers hub/middleware hub/dashboard agents lib ecosystem/mcp ecosystem/hooks ecosystem/templates ecosystem/subagents ecosystem/commands; do mkdir -p "$INSTALL_DIR/$d"; done
 
 cp "$SRC/start.py" "$INSTALL_DIR/"
 
 # Hub package (full modular structure)
 cp "$SRC/hub/"*.py "$INSTALL_DIR/hub/"
 cp "$SRC/hub/routers/"*.py "$INSTALL_DIR/hub/routers/"
+cp "$SRC/hub/middleware/"*.py "$INSTALL_DIR/hub/middleware/" 2>/dev/null || true
 rm -rf "$INSTALL_DIR/hub/dashboard"
 cp -R "$SRC/hub/dashboard" "$INSTALL_DIR/hub/dashboard"
 
@@ -147,7 +148,7 @@ try:
   if not tasks: print('  No tasks'); sys.exit()
   for t in tasks:
     s=t.get('status','?')
-    icon={'created':'📋','assigned':'👤','in_progress':'⚙️','done':'✅','failed':'❌','cancelled':'🚫'}.get(s,'•')
+    icon={'to_do':'📋','in_progress':'⚙️','code_review':'🔍','in_testing':'🧪','uat':'👤','done':'✅','failed':'❌','cancelled':'🚫','created':'📋','assigned':'👤'}.get(s,'•')
     print(f'  {icon} #{t[\"id\"]:3d} [{s:12s}] → {t.get(\"assigned_to\",\"?\"):10s} {t.get(\"description\",\"\")[:60]}')
 except: print('  Hub not running')
 " 2>/dev/null || echo "  Hub not running"

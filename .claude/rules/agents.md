@@ -24,7 +24,16 @@ Agents are Claude CLI workers. `worker.py` is the main loop — boot, poll hub, 
 2. Poll loop: `POST /poll/{name}` every 2s
 3. Got messages → filter ecosystem updates → detect task vs chat
 4. Task: detect project, branch, inject context (patterns, MCP, ecosystem), call Claude
-5. Post-task: verify, vote on patterns, extract learning, stage changes for review
+5. Post-task: verify, vote on patterns, extract learning
+6. Status transition: dev agents → `code_review` (triggers auto-review); architect/qa/reviewer → `done`
+
+## Hidden & Reviewer Agents
+
+- `HIDDEN_AGENTS`: Set of agent names with `"hidden": true` in config (reviewer-logic, reviewer-style, reviewer-arch)
+- Hidden agents run haiku model, are invisible on dashboard, filtered from team roster
+- `_SKIP_REVIEW_ROLES`: architect, qa, reviewer-* — these go straight to `done`, not `code_review`
+- Reviewer agents receive `review_request` messages, review diffs, submit verdicts via `POST /tasks/{tid}/review`
+- Dev agents receive `review_feedback` messages with comments to address during rework
 
 ## Patterns & Learning
 

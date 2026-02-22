@@ -135,7 +135,7 @@ input:focus, select:focus, textarea:focus { border-color:var(--ac); outline:none
 .new-task input, .new-task select { padding:5px 8px; background:var(--bg2); border:1px solid var(--border); border-radius:4px; color:var(--fg); font-size:11px; min-width:0; box-sizing:border-box; }
 .new-task input:first-child { flex:1; }
 .new-task button { padding:5px 12px; background:var(--ac); color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:11px; }
-.kanban { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+.kanban { display:grid; grid-template-columns:repeat(7,1fr); gap:8px; }
 .kanban-col { background:var(--bg2); border-radius:8px; padding:8px; min-height:120px; border:1px solid var(--border); }
 .kanban-title { font-size:11px; font-weight:600; padding:4px 0 8px; border-bottom:1px solid var(--border); margin-bottom:6px; }
 .kanban-count { background:var(--bg3); padding:1px 6px; border-radius:8px; font-size:10px; margin-left:4px; }
@@ -144,6 +144,10 @@ input:focus, select:focus, textarea:focus { border-color:var(--ac); outline:none
 .task-card.task-done { border-left:3px solid var(--green); } .task-card.task-failed { border-left:3px solid var(--red); }
 .task-card.task-cancelled { border-left:3px solid var(--fg3); opacity:.6; }
 .task-card.task-in_progress { border-left:3px solid var(--blue); }
+.task-card.task-to_do { border-left:3px solid var(--fg3); }
+.task-card.task-code_review { border-left:3px solid #a855f7; }
+.task-card.task-in_testing { border-left:3px solid var(--yellow); }
+.task-card.task-uat { border-left:3px solid #3b82f6; }
 .task-id { color:var(--ac); font-weight:600; } .task-agent { color:var(--fg2); }
 .task-priority { font-size:9px; padding:1px 4px; border-radius:3px; font-weight:600; }
 .p1,.p2 { background:var(--red); color:#fff; } .p3,.p4 { background:var(--yellow); color:#000; }
@@ -298,6 +302,21 @@ input:focus, select:focus, textarea:focus { border-color:var(--ac); outline:none
 /* ── Subtask Items ── */
 .subtask-item { display:flex; gap:6px; align-items:center; padding:3px 0; font-size:11px; }
 
+/* ── Code Review Badges ── */
+.review-badge { padding:4px 10px; border-radius:6px; font-size:11px; font-weight:500; }
+.review-pending { background:var(--bg3); color:var(--fg2); }
+.review-approved { background:rgba(63,185,80,0.15); color:var(--green); }
+.review-changes { background:rgba(210,153,34,0.15); color:var(--yellow); }
+
+/* ── Review Comments ── */
+.review-comments-list { max-height:200px; overflow-y:auto; }
+.review-comment { padding:6px 8px; border-left:2px solid var(--ac); margin-bottom:4px; background:var(--bg); border-radius:0 4px 4px 0; }
+.review-comment.resolved { opacity:0.5; border-left-color:var(--green); }
+.review-comment-header { display:flex; gap:8px; align-items:center; font-size:10px; }
+
+/* ── UAT Controls ── */
+.uat-controls { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; }
+
 /* ── Empty State Elements ── */
 .empty-state-icon { font-size:28px; margin-bottom:12px; }
 .empty-state-title { font-size:14px; margin-bottom:8px; }
@@ -355,7 +374,7 @@ input:focus, select:focus, textarea:focus { border-color:var(--ac); outline:none
   #sidebar.open { max-height:300px; border-bottom:1px solid var(--border); }
   #agentList { display:flex; overflow-x:auto; padding:4px; gap:4px; flex-wrap:wrap; }
   .agent-card { min-width:120px; flex-shrink:0; }
-  .kanban { grid-template-columns:1fr 1fr; }
+  .kanban { grid-template-columns:repeat(4,1fr); }
   .analytics-grid { grid-template-columns:repeat(2,1fr); }
   .test-summary { grid-template-columns:repeat(2,1fr); }
   .cmd-bar { flex-wrap:wrap; }
@@ -365,7 +384,7 @@ input:focus, select:focus, textarea:focus { border-color:var(--ac); outline:none
 }
 
 @media(max-width:480px) {
-  .kanban { grid-template-columns:1fr; }
+  .kanban { grid-template-columns:repeat(2,1fr); }
   .analytics-grid { grid-template-columns:1fr; }
   .test-summary { grid-template-columns:1fr; }
   .sidebar-hdr button { font-size:14px; }

@@ -53,8 +53,15 @@ function detectTaskChanges(newData) {
         playSound();
       } else if (status === 'failed') {
         toast(`Task #${id} failed (${agent}): ${desc}`, 'error', 6000);
-      } else if (status === 'in_progress' && prev === 'created') {
+      } else if (status === 'in_progress' && (prev === 'to_do' || prev === 'created')) {
         toast(`${agent} started task #${id}`, 'info', 3000);
+      } else if (status === 'code_review' && prev === 'in_progress') {
+        toast(`Task #${id} sent to code review`, 'info', 3000);
+      } else if (status === 'in_testing' && prev === 'code_review') {
+        toast(`Task #${id} code review passed — QA testing`, 'success', 4000);
+      } else if (status === 'uat' && prev === 'in_testing') {
+        toast(`Task #${id} ready for UAT approval`, 'info', 4000);
+        playSound();
       }
     }
   }
@@ -264,7 +271,7 @@ function renderSidebar(names) {
     const tokTotal = getAgentTokens(n);
     const tokCost = tokTotal?`${formatTokens(tokTotal)} · `:'';
     const exp = a.expertise?`<span class="agent-exp" title="Expertise">★${a.expertise}</span>`:'';
-    const queueCount = (data.tasks||[]).filter(t=>t.assigned_to===n&&['created','assigned','in_progress'].includes(t.status)).length;
+    const queueCount = (data.tasks||[]).filter(t=>t.assigned_to===n&&['to_do','created','assigned','in_progress','code_review','in_testing'].includes(t.status)).length;
     const qBadge = queueCount?`<span class="queue-badge" title="${queueCount} task${queueCount>1?'s':''} in queue">${queueCount}</span>`:'';
     return `<div class="agent-card${n===sel?' sel':''}" onclick="selectAgent('${escAttr(n)}')">
       <div class="agent-dot dot-${dot}"></div>
@@ -853,8 +860,8 @@ function renderTasks(p){
   if(taskSearch){const q=taskSearch.toLowerCase();tasks=tasks.filter(t=>(t.description||'').toLowerCase().includes(q)||('#'+t.id).includes(q));}
   if(taskFilterAgent)tasks=tasks.filter(t=>t.assigned_to===taskFilterAgent);
   if(taskFilterPriority)tasks=tasks.filter(t=>t.priority==parseInt(taskFilterPriority));
-  const cols={created:[],in_progress:[],done:[],failed:[]};
-  tasks.forEach(t=>{const s=t.status||'created';if(cols[s])cols[s].push(t);else if(s==='assigned'||s==='in_review')cols.in_progress.push(t);else if(s==='cancelled')cols.failed.push(t);});
+  const cols={to_do:[],in_progress:[],code_review:[],in_testing:[],uat:[],done:[],failed:[]};
+  tasks.forEach(t=>{const s=t.status||'to_do';if(cols[s])cols[s].push(t);else if(s==='created'||s==='assigned')cols.to_do.push(t);else if(s==='in_review')cols.code_review.push(t);else if(s==='cancelled')cols.failed.push(t);});
   p.innerHTML=`<div class="new-task">
     <input id="newTaskDesc" placeholder="New task...">
     <select id="newTaskAgent" class="select-sm">${names.map(n=>`<option value="${n}">${n}</option>`).join('')}</select>
@@ -884,8 +891,9 @@ function renderTasks(p){
         <div class="task-desc">${esc(t.description||'').substring(0,100)}</div>
         ${t.elapsed_seconds||t.tokens_used?`<div style="font-size:9px;color:var(--fg3);margin-top:3px">${t.elapsed_seconds?(t.elapsed_seconds>=60?Math.floor(t.elapsed_seconds/60)+'m '+t.elapsed_seconds%60+'s':t.elapsed_seconds+'s'):''}${t.elapsed_seconds&&t.tokens_used?' · ':''}${t.tokens_used?formatTokens(t.tokens_used)+' tok':''}</div>`:''}
         <div class="task-actions" onclick="event.stopPropagation()">
-          ${t.status==='created'?`<button class="task-btn task-start" onclick="assignTask(${t.id})">▶ Start</button>`:''}
+          ${t.status==='to_do'||t.status==='created'?`<button class="task-btn task-start" onclick="assignTask(${t.id})">▶ Start</button>`:''}
           ${t.status==='in_progress'?`<button class="task-btn task-cancel" onclick="cancelTask(${t.id})">✗ Cancel</button>`:''}
+          ${t.status==='uat'?`<button class="task-btn" style="background:var(--green);color:#fff" onclick="uatDecision(${t.id},'approve')">✓ Approve</button><button class="task-btn" style="background:var(--red);color:#fff" onclick="showUatReject(${t.id})">✗ Reject</button>`:''}
           ${['done','failed','cancelled'].includes(t.status)?`<button class="task-btn" style="background:var(--cyan);color:#000" onclick="retryTask(${t.id},'${escAttr(t.assigned_to)}')">↻ Retry</button>`:''}
         </div></div>`).join('')}
     </div>`).join('')}</div>
@@ -894,7 +902,7 @@ function renderTasks(p){
   if(allTasks.some(t=>t.depends_on?.length))setTimeout(()=>drawDepGraph(allTasks),50);
 }
 
-function statusIcon(s){return{created:'📋',assigned:'👤',in_progress:'⚙️',in_review:'🔍',done:'✅',failed:'❌',cancelled:'🚫'}[s]||'•';}
+function statusIcon(s){return{to_do:'📋',created:'📋',assigned:'👤',in_progress:'⚡',code_review:'🔍',in_review:'🔍',in_testing:'🧪',uat:'👤',done:'✅',failed:'❌',cancelled:'🚫'}[s]||'•';}
 
 function drawDepGraph(tasks){
   const canvas=$('depCanvas');if(!canvas)return;
@@ -909,7 +917,7 @@ function drawDepGraph(tasks){
 
   const nodes={};let col=0;
   // Layout: group by status
-  const statusOrder=['created','assigned','in_progress','in_review','done','failed','cancelled'];
+  const statusOrder=['to_do','created','assigned','in_progress','code_review','in_testing','uat','done','failed','cancelled'];
   const groups={};
   tasks.forEach(t=>{const s=t.status||'created';if(!groups[s])groups[s]=[];groups[s].push(t);});
   let x=40;
@@ -936,7 +944,7 @@ function drawDepGraph(tasks){
     });
   });
   // Draw nodes
-  const colors={created:cssVar('--fg3'),in_progress:cssVar('--blue'),done:cssVar('--green'),failed:cssVar('--red'),cancelled:cssVar('--fg3')};
+  const colors={to_do:cssVar('--fg3'),created:cssVar('--fg3'),in_progress:cssVar('--blue'),code_review:'#a855f7',in_testing:cssVar('--yellow'),uat:'#3b82f6',done:cssVar('--green'),failed:cssVar('--red'),cancelled:cssVar('--fg3')};
   Object.values(nodes).forEach(n=>{
     const c=colors[n.task.status]||'#8b949e';
     ctx.fillStyle=c;ctx.beginPath();ctx.roundRect(n.x-4,n.y-4,48,24,4);ctx.fill();
@@ -952,7 +960,7 @@ async function createTask(){
   if(!desc)return;
   const deps=depsStr?depsStr.split(',').map(d=>parseInt(d.replace('#','').trim())).filter(n=>n>0):[];
   await fetch(HUB+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({description:desc,assigned_to:agent,status:'created',depends_on:deps,priority:pri,created_by:'user'})});
+    body:JSON.stringify({description:desc,assigned_to:agent,status:'to_do',depends_on:deps,priority:pri,created_by:'user'})});
   $('newTaskDesc').value='';$('newTaskDeps').value='';
   setTimeout(()=>{poll();renderPanel();},300);
 }
@@ -984,8 +992,11 @@ async function showTaskDetail(id){
   const subTasks=(data.tasks||[]).filter(t=>t.created_by===task.assigned_to&&t.id!==id);
   const parentRef=task.description?.match(/#(\d+)/)?.[1];
   
-  const statusColors={created:'var(--fg3)',in_progress:'var(--blue)',done:'var(--green)',failed:'var(--red)',cancelled:'var(--fg3)'};
+  const statusColors={to_do:'var(--fg3)',created:'var(--fg3)',in_progress:'var(--blue)',code_review:'#a855f7',in_testing:'var(--yellow)',uat:'#3b82f6',done:'var(--green)',failed:'var(--red)',cancelled:'var(--fg3)'};
   const statusBg=statusColors[task.status]||'var(--fg3)';
+  // Fetch review data
+  const reviews=data.task_reviews?.[String(id)]||{};
+  const comments=data.task_comments?.[String(id)]||[];
   const names=data.agent_names||[];
 
   createModal(null, 'modal-w-xl modal-scrollable', `
@@ -994,7 +1005,7 @@ async function showTaskDetail(id){
         <span class="task-id" style="font-size:18px">#${task.id}</span>
         <span class="task-priority p${task.priority||5}" style="font-size:11px">P${task.priority||5}</span>
         <span style="padding:3px 10px;border-radius:12px;font-size:11px;font-weight:500;background:${statusBg};color:#fff">
-          ${statusIcon(task.status||'created')} ${(task.status||'created').replace('_',' ')}
+          ${statusIcon(task.status||'to_do')} ${(task.status||'to_do').replace('_',' ')}
         </span>
       </div>
       <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">✕</button>
@@ -1017,6 +1028,42 @@ async function showTaskDetail(id){
       <div class="detail-cell word-break" style="font-size:11px;max-height:200px;overflow-y:auto;border:1px solid var(--border)">${esc(task.result)}</div>
     </div>`:''}
 
+    ${Object.keys(reviews).length?`<div class="mb-16"><div class="text-sm text-dim mb-4 font-bold">Code Reviews</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${['reviewer-logic','reviewer-style','reviewer-arch'].map(r=>{
+          const rv=reviews[r];
+          if(!rv)return`<div class="review-badge review-pending">${r.replace('reviewer-','')}: ⏳ pending</div>`;
+          const isApproved=rv.verdict==='approve';
+          return`<div class="review-badge ${isApproved?'review-approved':'review-changes'}">${r.replace('reviewer-','')}: ${isApproved?'✅ approved':'🔄 changes requested'}${rv.auto?' (auto)':''}</div>`;
+        }).join('')}
+      </div>
+    </div>`:''}
+
+    ${comments.length?`<div class="mb-16"><div class="text-sm text-dim mb-4 font-bold">Review Comments (${comments.length})</div>
+      <div class="review-comments-list">
+        ${comments.slice(-20).map(c=>`<div class="review-comment ${c.resolved?'resolved':''}">
+          <div class="review-comment-header">
+            <span class="text-ac">${esc(c.agent)}</span>
+            <span class="text-muted text-sm">${formatTime(c.timestamp)}</span>
+            ${!c.resolved?`<button class="task-btn" style="font-size:9px;padding:1px 4px" onclick="resolveComment(${id},${c.id})">resolve</button>`:'<span class="text-green text-sm">✓ resolved</span>'}
+          </div>
+          <div class="text-sm" style="margin-top:2px">${esc(c.text)}</div>
+        </div>`).join('')}
+      </div>
+    </div>`:''}
+
+    ${task.status==='uat'?`<div class="mb-16 uat-controls">
+      <div class="text-sm text-dim mb-4 font-bold">User Acceptance Testing</div>
+      <p class="text-sm text-muted" style="margin-bottom:8px">Code review passed, QA tests passed. Review the changes and approve or reject.</p>
+      <div style="display:flex;gap:8px;align-items:flex-start">
+        <button class="modal-btn-ok" style="background:var(--green);flex-shrink:0" onclick="uatDecision(${task.id},'approve');this.closest('.modal-overlay').remove()">✓ Approve & Complete</button>
+        <div style="flex:1">
+          <textarea id="_uatFeedback" placeholder="Rejection feedback..." rows="2" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:11px;margin-bottom:4px"></textarea>
+          <button class="modal-btn-cancel" style="background:var(--red);color:#fff;border:none" onclick="uatDecision(${task.id},'reject',$('_uatFeedback')?.value);this.closest('.modal-overlay').remove()">✗ Reject</button>
+        </div>
+      </div>
+    </div>`:''}
+
     ${subTasks.length?`<div class="mb-16"><div class="text-sm text-dim mb-4 font-bold">Related Sub-tasks</div>
       ${subTasks.slice(0,10).map(st=>`<div class="subtask-item">
         <span class="text-dim">#${st.id}</span>
@@ -1026,7 +1073,7 @@ async function showTaskDetail(id){
     </div>`:''}
 
     <div class="modal-actions" style="flex-wrap:wrap;gap:6px">
-      ${task.status==='created'?`<select id="_reassign" class="select-sm">
+      ${task.status==='to_do'||task.status==='created'?`<select id="_reassign" class="select-sm">
         ${names.map(n=>`<option value="${esc(n)}"${n===task.assigned_to?' selected':''}>${esc(n)}</option>`).join('')}
       </select>
       <button class="modal-btn-ok" onclick="reassignTask(${task.id},$('_reassign').value);this.closest('.modal-overlay').remove()">▶ Assign & Start</button>`:''}
@@ -1065,9 +1112,9 @@ async function restartAgent(name){
 }
 
 async function retryTask(id,agent){
-  // Reset task to created — preserve branch/project/external_id
+  // Reset task to to_do — preserve branch/project/external_id
   await fetch(HUB+'/tasks/'+id,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({status:'created',result:'',started_at:'',completed_at:''})});
+    body:JSON.stringify({status:'to_do',result:'',started_at:'',completed_at:''})});
   // Fetch task details including branch info
   let desc='',branch='',project='',extId='';
   try{const t=await(await fetch(HUB+'/tasks/'+id)).json();
@@ -1081,12 +1128,27 @@ async function retryTask(id,agent){
   setTimeout(poll,300);
 }
 
+async function uatDecision(id,action,feedback){
+  await fetch(HUB+'/tasks/'+id+'/uat',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action,feedback:feedback||''})});
+  toast(action==='approve'?`Task #${id} approved!`:`Task #${id} rejected`,action==='approve'?'success':'warn');
+  setTimeout(()=>{poll();renderPanel();},300);
+}
+function showUatReject(id){
+  const fb=prompt('Rejection feedback (what needs to change?):');
+  if(fb!==null)uatDecision(id,'reject',fb);
+}
+async function resolveComment(tid,cid){
+  await fetch(HUB+'/tasks/'+tid+'/comments/'+cid+'/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  setTimeout(()=>{poll();showTaskDetail(tid);},300);
+}
+
 async function inboxToTask(sender,content){
   const names=data.agent_names||[];
   let target='architect';
   try{const r=await(await fetch(HUB+'/route?msg='+encodeURIComponent(content))).json();if(r.target)target=r.target;}catch{}
   const r=await(await fetch(HUB+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({description:content,assigned_to:target,status:'created',priority:5,created_by:'user'})})).json();
+    body:JSON.stringify({description:content,assigned_to:target,status:'to_do',priority:5,created_by:'user'})})).json();
   if(r?.id){notify(`📋 Created task #${r.id} from ${sender}'s message`);dismissSender(sender);}
 }
 async function renderActivity(p){

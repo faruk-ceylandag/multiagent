@@ -38,9 +38,22 @@ ecosystem/
 
 This means: drop a new .md in ecosystem/subagents/ and agents pick it up at their next task without restart.
 
+## Smart Hints (`get_smart_hints()`)
+
+Token-efficient context injection. Analyzes task keywords → returns only relevant rules/tips (<300 tokens).
+- Role-aware: QA gets mandatory test rules, devs get contextual tips
+- Pipeline-aware: reviewer agents get review submission rules, rework gets comment-reading tips
+- Add new keyword→hint mappings for new features to reduce agent discovery tokens
+
 ## Adding New Tools
 
 - **Subagent**: Add `my-agent.md` to `ecosystem/subagents/`
 - **Command**: Add `my-command.md` to `ecosystem/commands/`
 - **Skill**: Add `my-skill/` directory to `ecosystem/skills/`
 - **MCP server**: Add to `ecosystem/mcp/setup_mcp.py` MCP_SERVERS dict
+
+## Pipeline Commands
+
+- `/review` — Run code review on current diff
+- `/submit-review` — Submit review verdict (for reviewer agents)
+- `/uat` — Submit UAT decision (approve/reject)

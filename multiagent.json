@@ -18,6 +18,21 @@
     {
       "name": "qa",
       "model": ""
+    },
+    {
+      "name": "reviewer-logic",
+      "model": "haiku",
+      "hidden": true
+    },
+    {
+      "name": "reviewer-style",
+      "model": "haiku",
+      "hidden": true
+    },
+    {
+      "name": "reviewer-arch",
+      "model": "haiku",
+      "hidden": true
     }
   ],
   "focus_project": "",

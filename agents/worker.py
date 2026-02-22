@@ -223,7 +223,8 @@ def _detect_needed_mcps(task_text):
 ctx = AgentContext()
 
 # ── Set agent role from name ──
-_KNOWN_ROLES = {"architect", "frontend", "backend", "qa", "devops", "security", "reviewer"}
+_KNOWN_ROLES = {"architect", "frontend", "backend", "qa", "devops", "security", "reviewer",
+                 "reviewer-logic", "reviewer-style", "reviewer-arch"}
 ctx.AGENT_ROLE = ctx.AGENT_NAME if ctx.AGENT_NAME in _KNOWN_ROLES else ""
 
 # ── Start log streaming ──
@@ -581,7 +582,7 @@ while True:
                 result = hub_post(ctx, "/tasks", {
                     "description": desc[:500],
                     "assigned_to": ctx.AGENT_NAME,
-                    "status": "created",
+                    "status": "to_do",
                     "created_by": next((m["sender"] for m in msgs), "user"),
                     "project": ctx.current_project or "",
                     "priority": 5
@@ -1221,7 +1222,13 @@ RULES:
                 fail_reason = "Verification failed (tests/lint/build)"
             else:
                 fail_reason = ""
-            update_task_status(ctx, ctx.current_task_id, "done" if task_ok else "failed", detail=fail_reason)
+            # Determine final status: dev agents go to code_review, others go to done
+            _SKIP_REVIEW_ROLES = {"architect", "qa", "reviewer-logic", "reviewer-style", "reviewer-arch"}
+            if task_ok and ctx.AGENT_NAME not in _SKIP_REVIEW_ROLES:
+                _final_status = "code_review"
+            else:
+                _final_status = "done" if task_ok else "failed"
+            update_task_status(ctx, ctx.current_task_id, _final_status, detail=fail_reason)
             hub_post(ctx, "/agents/specialization", {"agent_name": ctx.AGENT_NAME,
                 "task_type": ctx.current_project or "general", "success": task_ok})
 

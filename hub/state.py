@@ -32,6 +32,11 @@ for _p in [os.path.join(WORKSPACE, "multiagent.json"),
         break
 
 ALL_AGENTS = [a["name"] if isinstance(a, dict) else a for a in _cfg.get("agents", ["architect", "frontend", "backend", "qa"])]
+HIDDEN_AGENTS = set()
+for _a in _cfg.get("agents", []):
+    if isinstance(_a, dict) and _a.get("hidden"):
+        HIDDEN_AGENTS.add(_a["name"])
+VISIBLE_AGENTS = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
 MAX_TASKS = 500
 BUDGET_LIMIT = float(_cfg.get("budget_limit", 0))
 BUDGET_PER_AGENT = float(_cfg.get("budget_per_agent", 0))
@@ -137,17 +142,33 @@ ROUTE_MAP = {
 MULTI_SCOPE_KEYWORDS = ["and also", "frontend and backend", "full stack", "both", "refactor", "redesign", "migration", "feature", "epic", "story", "end to end", "fullstack", "google doc", "google sheet", "google slide", "spreadsheet", "presentation"]
 
 # ── Task State Machine ──
-TASK_STATES = ["created", "assigned", "in_progress", "in_review", "done", "failed", "cancelled", "blocked_by_failure"]
+TASK_STATES = ["to_do", "in_progress", "code_review", "in_testing", "uat", "done", "failed",
+               # Legacy states kept for backward compat transition validation
+               "created", "assigned", "in_review", "cancelled", "blocked_by_failure"]
 VALID_TRANSITIONS = {
-    "created": {"assigned", "in_progress", "cancelled"},
-    "assigned": {"in_progress", "cancelled", "created"},
-    "in_progress": {"in_review", "done", "failed", "cancelled"},
-    "in_review": {"done", "failed", "in_progress"},
-    "done": {"created"},
-    "failed": {"created", "in_progress"},
-    "cancelled": {"created"},
-    "blocked_by_failure": {"created", "assigned", "cancelled"},
+    "to_do": {"in_progress", "failed", "cancelled"},
+    "in_progress": {"code_review", "done", "failed", "cancelled"},
+    "code_review": {"in_progress", "in_testing", "failed"},
+    "in_testing": {"in_progress", "uat", "failed"},
+    "uat": {"done", "in_progress", "failed"},
+    "done": {"to_do"},
+    "failed": {"to_do", "in_progress"},
+    # Legacy states — allow transitions out
+    "created": {"to_do", "assigned", "in_progress", "cancelled"},
+    "assigned": {"in_progress", "cancelled", "to_do"},
+    "in_review": {"done", "failed", "in_progress", "code_review"},
+    "cancelled": {"to_do"},
+    "blocked_by_failure": {"to_do", "assigned", "cancelled"},
 }
+
+# ── Status Migration (legacy → new) ──
+STATUS_MIGRATION = {"created": "to_do", "assigned": "in_progress", "in_review": "code_review"}
+
+# ── Review / Comment State ──
+task_comments: Dict[str, list] = {}    # {task_id_str: [{id, agent, text, timestamp, resolved}]}
+task_reviews: Dict[str, dict] = {}     # {task_id_str: {agent_name: {verdict, comments, timestamp}}}
+_comment_counter = 0
+MAX_REWORK_LOOPS = 3                   # Max code_review rework cycles before auto-approve
 
 # ── Notifications ──
 notification_config = _cfg.get("notifications_webhook", {})
@@ -425,6 +446,9 @@ def _do_save():
             "patterns": dict(pattern_registry),
             "pattern_id_counter": _pattern_id_counter,
             "messages": {k: list(v)[-150:] for k, v in dict(messages).items()},
+            "task_comments": dict(task_comments),
+            "task_reviews": dict(task_reviews),
+            "comment_counter": _comment_counter,
         }
         # Atomic write: temp file + rename
         tmp = STATE_FILE + ".tmp"
@@ -457,6 +481,7 @@ def load_state():
     global test_results, agent_specialization, agent_learnings
     global pattern_registry, _pattern_id_counter
     global pending_plans, _plan_counter, cache_registry
+    global task_comments, task_reviews, _comment_counter
     if not STATE_FILE or not os.path.exists(STATE_FILE):
         return
     try:
@@ -504,6 +529,15 @@ def load_state():
         cache_registry.update(s.get("cache_registry", {}))
         pattern_registry.update(s.get("patterns", {}))
         _pattern_id_counter = s.get("pattern_id_counter", 0)
+        task_comments.update(s.get("task_comments", {}))
+        task_reviews.update(s.get("task_reviews", {}))
+        _comment_counter = s.get("comment_counter", 0)
+        # ── Migrate legacy task statuses ──
+        for tid, task in tasks.items():
+            old_status = task.get("status", "")
+            if old_status in STATUS_MIGRATION:
+                task["status"] = STATUS_MIGRATION[old_status]
+                logger.info(f"Migrated task #{tid}: {old_status} → {task['status']}")
         logger.info(f"Restored: {len(tasks)} tasks, {len(pattern_registry)} patterns, {len(um)} inbox")
     except Exception as e:
         logger.warning(f"load: {e}")
@@ -660,7 +694,8 @@ def _build_dashboard_data():
     Quick dict() copies prevent RuntimeError from concurrent dict modifications."""
     now = datetime.now()
     # Quick copies to avoid RuntimeError during dict iteration
-    agent_names = list(ALL_AGENTS)
+    # Filter hidden agents from dashboard display
+    agent_names = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
     msgs_snap = dict(messages)
     usage_snap = dict(usage_log)
     locks_snap = dict(file_locks)
@@ -734,7 +769,7 @@ def _build_dashboard_data():
         "agents": ai, "agent_names": agent_names,
         "pending": {k: len(v) for k, v in msgs_snap.items() if v},
         "tasks": sorted(tasks_snap,
-                        key=lambda t: (0 if t.get("status") in ("in_progress", "created", "assigned") else 1,
+                        key=lambda t: (0 if t.get("status") in ("in_progress", "to_do", "code_review", "in_testing", "uat", "created", "assigned") else 1,
                                        t.get("priority", 5), -t.get("id", 0)))[:100],
         "usage": usage_snap,
         "total_tokens": sum(c.get("tokens_in", 0) + c.get("tokens_out", 0) for c in usage_snap.values()),
@@ -747,11 +782,13 @@ def _build_dashboard_data():
         "pattern_count": len(pattern_registry),
         "top_patterns": sorted(pattern_registry.values(), key=lambda p: p.get("score", 0), reverse=True)[:10],
         "pending_plans": {k: v for k, v in dict(pending_plans).items() if v.get("status") == "pending"},
+        "task_comments": dict(task_comments),
+        "task_reviews": dict(task_reviews),
         "analytics": {
             "by_agent": by_agent, "durations": durations,
             "total_tasks": len(tasks),
             "tasks_done": len([t for t in tasks_snap if t.get("status") == "done"]),
-            "tasks_pending": len([t for t in tasks_snap if t.get("status") in ("created", "assigned", "in_progress")]),
+            "tasks_pending": len([t for t in tasks_snap if t.get("status") in ("to_do", "in_progress", "code_review", "in_testing", "uat", "created", "assigned")]),
             "budget": {"total_spent": total_cost, "limit": BUDGET_LIMIT,
                        "remaining": max(0, BUDGET_LIMIT - total_cost) if BUDGET_LIMIT else None},
             "tests": test_summary,
@@ -766,7 +803,7 @@ def start_background_threads():
     threading.Thread(target=_review_timeout_timer, daemon=True).start()
 
 def _review_timeout_timer():
-    """Auto-approve peer reviews pending > 10 minutes."""
+    """Auto-approve code reviews pending > 15 minutes."""
     while not _shutdown_event.is_set():
         _shutdown_event.wait(60)
         if _shutdown_event.is_set():
@@ -774,7 +811,34 @@ def _review_timeout_timer():
         now = datetime.now()
         with lock:
             for tid, task in dict(tasks).items():
-                if task.get("review_status") == "pending_review":
+                tid_str = str(tid)
+                # New code review timeout: if task is in code_review and reviews are pending > 15 min
+                if task.get("status") == "code_review":
+                    reviews = task_reviews.get(tid_str, {})
+                    # Check if review was dispatched (has a timestamp marker)
+                    review_started = task.get("review_dispatched_at", "")
+                    if review_started:
+                        try:
+                            started_time = datetime.fromisoformat(review_started)
+                            if (now - started_time).total_seconds() > 900:  # 15 min
+                                # Auto-approve missing reviews
+                                reviewers = ["reviewer-logic", "reviewer-style", "reviewer-arch"]
+                                for r in reviewers:
+                                    if r not in reviews:
+                                        reviews[r] = {"verdict": "approve", "comments": [],
+                                                      "timestamp": now.isoformat(), "auto": True}
+                                task_reviews[tid_str] = reviews
+                                # Check if now all approved → advance to in_testing
+                                if all(reviews.get(r, {}).get("verdict") == "approve" for r in reviewers):
+                                    task["status"] = "in_testing"
+                                    task.pop("review_dispatched_at", None)
+                                    add_activity("system", task.get("assigned_to", "?"), "review_auto_approved",
+                                                 f"Code review #{tid} auto-approved (15 min timeout)")
+                                bump_version()
+                        except (ValueError, TypeError):
+                            pass
+                # Legacy peer review timeout
+                elif task.get("review_status") == "pending_review":
                     completed_at = task.get("completed_at", "")
                     if completed_at:
                         try:

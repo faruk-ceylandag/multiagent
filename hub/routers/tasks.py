@@ -8,6 +8,7 @@ from hub.state import (
     lock, tasks, agents, pipeline, ALL_AGENTS, TASK_STATES, VALID_TRANSITIONS,
     analytics_log, MAX_ANALYTICS, add_activity, save_state, send_notification,
     messages, bump_version, pending_plans, logger,
+    task_comments, task_reviews, HIDDEN_AGENTS, STATUS_MIGRATION, MAX_REWORK_LOOPS,
 )
 
 MAX_REWORK_ITERATIONS = 5
@@ -57,10 +58,13 @@ def create_task(data: dict):
         # Check for circular dependencies
         if deps and _has_dependency_cycle(tid, deps, tasks):
             return {"status": "error", "message": "Circular dependency detected", "code": "CIRCULAR_DEP"}
+        raw_status = data.get("status", "to_do")
+        # Migrate legacy status values
+        raw_status = STATUS_MIGRATION.get(raw_status, raw_status)
         task = {
             "id": tid, "description": data.get("description", ""),
             "assigned_to": data.get("assigned_to", ""),
-            "status": data.get("status", "created"),
+            "status": raw_status,
             "depends_on": deps,
             "project": data.get("project", ""),
             "branch": data.get("branch", ""),
@@ -150,12 +154,10 @@ def update_task(tid: int, data: dict):
                       {"task_id": tid, "old_status": old_status, "new_status": new_status})
 
         # ── Auto-notification: only on actual status transitions ──
-        if new_status == "done" and old_status != "done":
+        if new_status == "code_review" and old_status != "code_review":
+            _dispatch_code_review(tid)
+        elif new_status == "done" and old_status != "done":
             _auto_notify_dependents(tid)
-            # Auto-request peer review for dev tasks
-            assigned = tasks[tid].get("assigned_to", "")
-            if assigned not in ("architect", "qa", "") and not tasks[tid].get("review_status"):
-                _auto_request_peer_review(tid)
         elif new_status == "failed" and old_status != "failed":
             _auto_notify_blocker(tid)
             _maybe_create_rework_cycle(tid)
@@ -216,7 +218,7 @@ def _auto_notify_blocker(failed_tid):
             "msg_type": "blocker", "timestamp": ts,
         })
         # Mark dependent task as blocked_by_failure
-        if t.get("status") in ("created", "assigned"):
+        if t.get("status") in ("to_do", "created", "assigned"):
             t["status"] = "blocked_by_failure"
             t["blocked_reason"] = f"Dependency #{failed_tid} failed"
         # Notify architect to handle the blocker
@@ -230,66 +232,110 @@ def _auto_notify_blocker(failed_tid):
             })
 
 
-def _auto_request_peer_review(tid):
-    """After a dev completes a task, request code review from another dev agent."""
+def _dispatch_code_review(tid):
+    """Dispatch code review to 3 hidden reviewer agents (logic, style, architecture)."""
     task = tasks.get(tid, {})
+    if not task:
+        return
+
+    tid_str = str(tid)
+    reviewers = ["reviewer-logic", "reviewer-style", "reviewer-arch"]
+
+    # Track rework loop count
+    rework_count = task.get("_review_cycle", 0)
+    if rework_count >= MAX_REWORK_LOOPS:
+        # Auto-approve after max rework cycles
+        task["status"] = "in_testing"
+        task_reviews[tid_str] = {r: {"verdict": "approve", "comments": [],
+                                      "timestamp": datetime.now().isoformat(), "auto": True}
+                                  for r in reviewers}
+        add_activity("system", task.get("assigned_to", "?"), "review_auto_approved",
+                     f"Code review #{tid} auto-approved (max {MAX_REWORK_LOOPS} rework cycles)")
+        _dispatch_qa(tid)
+        bump_version()
+        return
+
+    # Clear previous reviews for re-review
+    task_reviews[tid_str] = {}
+    task["review_dispatched_at"] = datetime.now().isoformat()
+
+    desc = task.get("description", "")[:200]
+    project = task.get("project", "")
+    branch = task.get("branch", "")
     author = task.get("assigned_to", "")
-    if not author:
+    ts = datetime.now().isoformat()
+
+    specializations = {
+        "reviewer-logic": "LOGIC correctness: algorithm bugs, edge cases, null handling, race conditions, error propagation",
+        "reviewer-style": "CODE STYLE: naming, formatting, readability, DRY, function length, comment quality",
+        "reviewer-arch": "ARCHITECTURE: design patterns, separation of concerns, SOLID, scalability, coupling",
+    }
+
+    for r in reviewers:
+        review_msg = (
+            f"CODE REVIEW REQUEST — Task #{tid}\n"
+            f"Author: {author} | Project: {project} | Branch: {branch}\n"
+            f"Your focus: {specializations[r]}\n\n"
+            f"Task description:\n{desc}\n\n"
+            f"Review the code changes and respond by calling:\n"
+            f"curl -s -X POST $HUB/tasks/{tid}/review -H 'Content-Type: application/json' "
+            f"-d '{{\"agent\": \"{r}\", \"verdict\": \"approve\"}}'\n"
+            f"OR with issues:\n"
+            f"-d '{{\"agent\": \"{r}\", \"verdict\": \"request_changes\", \"comments\": ["
+            f"{{\"file\": \"path/file.js\", \"line\": 42, \"text\": \"Issue description\", \"severity\": \"warning\"}}]}}'"
+        )
+        messages.setdefault(r, []).append({
+            "sender": "system", "receiver": r,
+            "content": review_msg,
+            "msg_type": "task", "task_id": tid_str,
+            "timestamp": ts,
+        })
+
+    add_activity("system", "code_review", "review_dispatched",
+                 f"Code review #{tid} dispatched to {len(reviewers)} reviewers")
+    bump_version()
+
+
+def _dispatch_qa(tid):
+    """After all reviewers approve, dispatch task to QA for testing."""
+    task = tasks.get(tid, {})
+    if not task:
+        return
+    qa_agent = next((a for a in ALL_AGENTS if _is_qa_agent(a) and a not in HIDDEN_AGENTS), None)
+    if not qa_agent:
+        # No QA agent → skip to UAT
+        task["status"] = "uat"
+        ts = datetime.now().isoformat()
+        messages.setdefault("user", []).append({
+            "sender": "system", "receiver": "user",
+            "content": f"Task #{tid} passed code review (3/3 approved). No QA agent found — moved to UAT for your approval.",
+            "msg_type": "info", "timestamp": ts,
+        })
+        bump_version()
         return
 
-    # Only dev agents get peer review (skip architect, qa)
-    _non_dev = {"architect", "qa"}
-    if author in _non_dev:
-        return
-
-    # Find another dev agent (not the author, not architect, not QA)
-    dev_agents = [a for a in ALL_AGENTS if a not in _non_dev and a != author]
-    if not dev_agents:
-        return
-
-    # Pick dev with lowest active task count
-    best = dev_agents[0]
-    best_load = 999
-    for agent in dev_agents:
-        load = sum(1 for t in tasks.values()
-                   if t.get("assigned_to") == agent and t.get("status") in ("created", "assigned", "in_progress"))
-        if load < best_load:
-            best_load = load
-            best = agent
-
-    # Update task with review info
-    task["review_status"] = "pending_review"
-    task["reviewer"] = best
-
-    desc = task.get("description", "")[:120]
+    desc = task.get("description", "")[:200]
     project = task.get("project", "")
     branch = task.get("branch", "")
     ts = datetime.now().isoformat()
 
-    review_msg = (
-        f"PEER REVIEW — Task #{tid}\n"
-        f"Author: {author} | Project: {project} | Branch: {branch}\n"
+    qa_msg = (
+        f"QA TEST REQUEST — Task #{tid}\n"
+        f"Code review passed (3/3 approved). Now verify with tests.\n"
+        f"Author: {task.get('assigned_to', '?')} | Project: {project} | Branch: {branch}\n\n"
         f"Task: {desc}\n\n"
-        f"Review the code changes using @code-reviewer subagent. Check:\n"
-        f"1. Code quality, patterns, readability\n"
-        f"2. Error handling and edge cases\n"
-        f"3. Test coverage\n"
-        f"4. Security concerns\n\n"
-        f"After review, report: curl -s -X POST $HUB/tasks/{tid} "
-        f"-H 'Content-Type: application/json' "
-        f"-d '{{\"review_status\": \"approved\"}}'\n"
-        f"Or if changes needed: -d '{{\"review_status\": \"needs_changes\", \"review_notes\": \"...\"}}'"
+        f"Run ALL test suites, linters, and verify the changes. If tests pass, update task status:\n"
+        f"curl -s -X PUT $HUB/tasks/{tid} -H 'Content-Type: application/json' -d '{{\"status\": \"uat\"}}'\n"
+        f"If tests fail:\n"
+        f"curl -s -X PUT $HUB/tasks/{tid} -H 'Content-Type: application/json' -d '{{\"status\": \"failed\", \"detail\": \"Test failures: ...\"}}'"
     )
-
-    messages.setdefault(best, []).append({
-        "sender": "system", "receiver": best,
-        "content": review_msg,
+    messages.setdefault(qa_agent, []).append({
+        "sender": "system", "receiver": qa_agent,
+        "content": qa_msg,
         "msg_type": "task", "task_id": str(tid),
         "timestamp": ts,
     })
-
-    add_activity("system", best, "peer_review_request",
-                 f"Review #{tid} by {author} → {best}")
+    add_activity("system", qa_agent, "qa_dispatched", f"QA test #{tid} dispatched to {qa_agent}")
     bump_version()
 
 
@@ -361,7 +407,7 @@ def _maybe_create_rework_cycle(failed_tid):
         "id": rework_tid,
         "description": rework_desc,
         "assigned_to": dev_agent,
-        "status": "created",
+        "status": "to_do",
         "depends_on": [],
         "project": dev_task.get("project", ""),
         "branch": dev_task.get("branch", ""),
@@ -388,7 +434,7 @@ def _maybe_create_rework_cycle(failed_tid):
         "id": reverify_tid,
         "description": qa_desc,
         "assigned_to": failed_agent,
-        "status": "created",
+        "status": "to_do",
         "depends_on": [rework_tid],
         "project": dev_task.get("project", ""),
         "branch": dev_task.get("branch", ""),
@@ -534,7 +580,7 @@ def get_tasks(status: str = "", assigned_to: str = ""):
 
 @router.get("/tasks/queue/{name}")
 def task_queue(name: str):
-    q = [t for t in tasks.values() if t.get("assigned_to") == name and t.get("status") in ("created", "assigned")]
+    q = [t for t in tasks.values() if t.get("assigned_to") == name and t.get("status") in ("to_do", "created", "assigned")]
     q.sort(key=lambda t: (t.get("priority", 5), t.get("id", 0)))
     return q
 
@@ -616,10 +662,10 @@ def auto_assign_task(name: str):
     with lock:
         # Tasks explicitly assigned to this agent
         candidates = [t for t in tasks.values()
-                      if t.get("assigned_to") == name and t.get("status") == "created"]
+                      if t.get("assigned_to") == name and t.get("status") in ("to_do", "created")]
         # Unassigned tasks — prefer role-matched
         unassigned = [t for t in tasks.values()
-                      if not t.get("assigned_to") and t.get("status") == "created"
+                      if not t.get("assigned_to") and t.get("status") in ("to_do", "created")
                       and t.get("created_by") != name]
         # Score unassigned tasks by role match
         from hub.state import ROUTE_MAP, agent_specialization
@@ -650,7 +696,7 @@ def auto_assign_task(name: str):
             deps = t.get("depends_on", [])
             deps_met = all(tasks.get(d, {}).get("status") == "done" for d in deps)
             if deps_met:
-                t["status"] = "assigned"
+                t["status"] = "in_progress"
                 t["assigned_to"] = name
                 t["started_at"] = datetime.now().isoformat()
                 add_activity("system", name, "task_auto_assign", f"Auto-assigned #{t['id']}")
@@ -691,6 +737,196 @@ def submit_test_result(data: dict):
 def get_test_results(limit: int = 50):
     from hub.state import test_results
     return list(test_results[-limit:])
+
+
+# ── Task Comments ──
+@router.post("/tasks/{tid}/comments")
+def add_comment(tid: int, data: dict):
+    from hub.state import _comment_counter as _cc
+    import hub.state as _st
+    tid_str = str(tid)
+    if tid not in tasks:
+        return {"status": "not_found"}
+    agent = data.get("agent", "user")
+    text = data.get("text", "").strip()
+    if not text:
+        return {"status": "error", "message": "text required"}
+    with lock:
+        _st._comment_counter += 1
+        cid = _st._comment_counter
+        comment = {
+            "id": cid, "agent": agent, "text": text[:2000],
+            "timestamp": datetime.now().isoformat(), "resolved": False,
+        }
+        task_comments.setdefault(tid_str, []).append(comment)
+        bump_version()
+        save_state()
+    return {"status": "ok", "id": cid}
+
+
+@router.get("/tasks/{tid}/comments")
+def get_comments(tid: int):
+    return task_comments.get(str(tid), [])
+
+
+@router.post("/tasks/{tid}/comments/{cid}/resolve")
+def resolve_comment(tid: int, cid: int):
+    tid_str = str(tid)
+    comments = task_comments.get(tid_str, [])
+    for c in comments:
+        if c.get("id") == cid:
+            c["resolved"] = True
+            bump_version()
+            save_state()
+            return {"status": "ok"}
+    return {"status": "not_found"}
+
+
+# ── Code Review Verdict ──
+@router.post("/tasks/{tid}/review")
+def submit_review(tid: int, data: dict):
+    """Submit a reviewer verdict: approve or request_changes."""
+    tid_str = str(tid)
+    if tid not in tasks:
+        return {"status": "not_found"}
+    agent = data.get("agent", "")
+    verdict = data.get("verdict", "")
+    if verdict not in ("approve", "request_changes"):
+        return {"status": "error", "message": "verdict must be 'approve' or 'request_changes'"}
+    if not agent:
+        return {"status": "error", "message": "agent required"}
+
+    review_comments = data.get("comments", [])
+    with lock:
+        # Store verdict
+        task_reviews.setdefault(tid_str, {})[agent] = {
+            "verdict": verdict,
+            "comments": review_comments[:20],
+            "timestamp": datetime.now().isoformat(),
+        }
+        # Add review comments to task_comments
+        import hub.state as _st
+        for rc in review_comments[:20]:
+            _st._comment_counter += 1
+            task_comments.setdefault(tid_str, []).append({
+                "id": _st._comment_counter,
+                "agent": agent,
+                "text": f"[{rc.get('severity', 'info')}] {rc.get('file', '')}:{rc.get('line', '')} — {rc.get('text', '')}",
+                "timestamp": datetime.now().isoformat(),
+                "resolved": False,
+            })
+
+        add_activity(agent, "code_review", "review_verdict",
+                     f"#{tid} {verdict} by {agent}" + (f" ({len(review_comments)} comments)" if review_comments else ""))
+
+        # Check if all 3 reviewers have responded
+        reviewers = ["reviewer-logic", "reviewer-style", "reviewer-arch"]
+        reviews = task_reviews.get(tid_str, {})
+        all_responded = all(r in reviews for r in reviewers)
+
+        if all_responded:
+            all_approved = all(reviews[r].get("verdict") == "approve" for r in reviewers)
+            if all_approved:
+                # 3/3 approved → advance to in_testing
+                tasks[tid]["status"] = "in_testing"
+                tasks[tid].pop("review_dispatched_at", None)
+                add_activity("system", tasks[tid].get("assigned_to", "?"), "review_approved",
+                             f"Code review #{tid} passed (3/3 approved)")
+                # Notify user
+                ts = datetime.now().isoformat()
+                messages.setdefault("user", []).append({
+                    "sender": "system", "receiver": "user",
+                    "content": f"✅ Task #{tid} code review passed (3/3 approved). Moving to QA testing.",
+                    "msg_type": "info", "timestamp": ts,
+                })
+                _dispatch_qa(tid)
+            else:
+                # At least one request_changes → send back to dev
+                tasks[tid]["status"] = "in_progress"
+                tasks[tid].pop("review_dispatched_at", None)
+                tasks[tid]["_review_cycle"] = tasks[tid].get("_review_cycle", 0) + 1
+                dev_agent = tasks[tid].get("assigned_to", "")
+                # Collect all change requests
+                all_issues = []
+                for r in reviewers:
+                    rv = reviews.get(r, {})
+                    if rv.get("verdict") == "request_changes":
+                        for c in rv.get("comments", []):
+                            all_issues.append(f"[{r}] {c.get('file', '')}:{c.get('line', '')} — {c.get('text', '')}")
+                feedback = "\n".join(all_issues) if all_issues else "Reviewers requested changes. Check review comments."
+                ts = datetime.now().isoformat()
+                if dev_agent:
+                    messages.setdefault(dev_agent, []).append({
+                        "sender": "system", "receiver": dev_agent,
+                        "content": f"CODE REVIEW FEEDBACK — Task #{tid}\n"
+                                   f"Reviewers requested changes (cycle {tasks[tid].get('_review_cycle', 1)}/{MAX_REWORK_LOOPS}).\n\n"
+                                   f"ISSUES:\n{feedback}\n\n"
+                                   f"Fix all issues and move task back to code_review:\n"
+                                   f"curl -s -X PUT $HUB/tasks/{tid} -H 'Content-Type: application/json' -d '{{\"status\": \"code_review\"}}'",
+                        "msg_type": "task", "task_id": tid_str,
+                        "timestamp": ts,
+                    })
+                messages.setdefault("user", []).append({
+                    "sender": "system", "receiver": "user",
+                    "content": f"🔄 Task #{tid} needs changes. Sent back to {dev_agent} (cycle {tasks[tid].get('_review_cycle', 1)}/{MAX_REWORK_LOOPS}).",
+                    "msg_type": "info", "timestamp": ts,
+                })
+                add_activity("system", dev_agent, "review_changes_requested",
+                             f"Review #{tid} needs changes (cycle {tasks[tid].get('_review_cycle', 1)})")
+
+        bump_version()
+        save_state()
+    return {"status": "ok", "all_responded": all_responded}
+
+
+# ── UAT (User Acceptance Testing) ──
+@router.post("/tasks/{tid}/uat")
+def uat_decision(tid: int, data: dict):
+    """User approves or rejects a task in UAT status."""
+    if tid not in tasks:
+        return {"status": "not_found"}
+    action = data.get("action", "")
+    if action not in ("approve", "reject"):
+        return {"status": "error", "message": "action must be 'approve' or 'reject'"}
+    feedback = data.get("feedback", "").strip()
+
+    with lock:
+        task = tasks[tid]
+        if task.get("status") != "uat":
+            return {"status": "error", "message": f"Task is not in UAT status (current: {task.get('status')})"}
+
+        ts = datetime.now().isoformat()
+        if action == "approve":
+            task["status"] = "done"
+            task["completed_at"] = ts
+            analytics_log.append({
+                "task_id": tid, "agent": task.get("assigned_to", ""),
+                "status": "done", "started": task.get("started_at", ""),
+                "completed": ts,
+            })
+            add_activity("user", task.get("assigned_to", "?"), "uat_approved",
+                         f"UAT #{tid} approved by user")
+            send_notification("task_done", f"✅ #{tid} done (UAT approved): {task.get('description', '')[:60]}")
+            _auto_notify_dependents(tid)
+        else:
+            task["status"] = "in_progress"
+            task["_review_cycle"] = 0  # Reset review cycle on UAT reject
+            dev_agent = task.get("assigned_to", "")
+            if dev_agent:
+                messages.setdefault(dev_agent, []).append({
+                    "sender": "user", "receiver": dev_agent,
+                    "content": f"UAT REJECTED — Task #{tid}\n"
+                               f"User feedback: {feedback or 'No specific feedback provided.'}\n\n"
+                               f"Please address the feedback and move task back to code_review when done.",
+                    "msg_type": "task", "task_id": str(tid),
+                    "timestamp": ts,
+                })
+            add_activity("user", dev_agent or "?", "uat_rejected",
+                         f"UAT #{tid} rejected: {feedback[:80]}")
+
+        bump_version()
+        save_state()
+    return {"status": "ok", "new_status": tasks[tid]["status"]}
 
 
 # ── Plan Approval ──
@@ -738,7 +974,7 @@ def approve_plan(data: dict):
                 "id": tid,
                 "description": step.get("description", ""),
                 "assigned_to": step.get("assigned_to", ""),
-                "status": "created",
+                "status": "to_do",
                 "depends_on": deps,
                 "project": plan.get("project", ""),
                 "branch": plan.get("branch", ""),
