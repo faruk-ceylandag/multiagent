@@ -547,6 +547,7 @@ _cfg_mtime = 0
 
 def _config_reload_timer():
     global _cfg, BUDGET_LIMIT, BUDGET_PER_AGENT, notification_config, _cfg_mtime, auto_scale_config
+    global ALL_AGENTS, HIDDEN_AGENTS, VISIBLE_AGENTS
     while not _shutdown_event.is_set():
         _shutdown_event.wait(15)
         if _shutdown_event.is_set():
@@ -569,6 +570,26 @@ def _config_reload_timer():
                         notification_config = new_cfg["notifications_webhook"]
                     if "auto_scale" in new_cfg:
                         auto_scale_config.update(new_cfg["auto_scale"])
+                    # Hot-reload agent list (new agents, hidden flags)
+                    new_agents_cfg = new_cfg.get("agents", [])
+                    if new_agents_cfg:
+                        new_all = [a["name"] if isinstance(a, dict) else a for a in new_agents_cfg]
+                        new_hidden = set()
+                        for a in new_agents_cfg:
+                            if isinstance(a, dict) and a.get("hidden"):
+                                new_hidden.add(a["name"])
+                        if set(new_all) != set(ALL_AGENTS) or new_hidden != HIDDEN_AGENTS:
+                            ALL_AGENTS[:] = new_all
+                            HIDDEN_AGENTS.clear()
+                            HIDDEN_AGENTS.update(new_hidden)
+                            VISIBLE_AGENTS[:] = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
+                            # Init message queues and log buffers for new agents
+                            for a in ALL_AGENTS:
+                                if a not in messages:
+                                    messages[a] = deque(maxlen=200)
+                                if a not in log_buffers:
+                                    log_buffers[a] = deque(maxlen=2000)
+                            logger.info(f"Agents updated: {ALL_AGENTS} (hidden: {HIDDEN_AGENTS})")
                     _cfg.update(new_cfg)
                 logger.info(f"Config reloaded: budget=${BUDGET_LIMIT}, notifications={'on' if notification_config.get('url') else 'off'}")
             except Exception as e:

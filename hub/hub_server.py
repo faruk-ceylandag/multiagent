@@ -82,5 +82,16 @@ if _dashboard_dir:
 @app.get("/")
 def root_page():
     if _dashboard_dir:
-        return FileResponse(os.path.join(_dashboard_dir, "index.html"), media_type="text/html")
+        return FileResponse(os.path.join(_dashboard_dir, "index.html"), media_type="text/html",
+                            headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
     return HTMLResponse("<h1>Dashboard not found</h1>")
+
+# Force no-cache on static assets during development
+from starlette.middleware.base import BaseHTTPMiddleware as _BHTTPM
+class _NoCacheStatic(_BHTTPM):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/static"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return response
+app.add_middleware(_NoCacheStatic)

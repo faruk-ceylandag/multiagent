@@ -836,8 +836,8 @@ function renderTasks(p){
   if(taskSearch){const q=taskSearch.toLowerCase();tasks=tasks.filter(t=>(t.description||'').toLowerCase().includes(q)||('#'+t.id).includes(q));}
   if(taskFilterAgent)tasks=tasks.filter(t=>t.assigned_to===taskFilterAgent);
   if(taskFilterPriority)tasks=tasks.filter(t=>t.priority==parseInt(taskFilterPriority));
-  const cols={created:[],in_progress:[],done:[],failed:[]};
-  tasks.forEach(t=>{const s=t.status||'created';if(cols[s])cols[s].push(t);else if(s==='assigned'||s==='in_review')cols.in_progress.push(t);else if(s==='cancelled')cols.failed.push(t);});
+  const cols={to_do:[],in_progress:[],code_review:[],in_testing:[],uat:[],done:[],failed:[]};
+  tasks.forEach(t=>{const s=t.status||'to_do';if(cols[s])cols[s].push(t);else if(s==='created'||s==='assigned')cols.to_do.push(t);else if(s==='in_review')cols.code_review.push(t);else if(s==='cancelled')cols.failed.push(t);});
   p.innerHTML=`<div class="new-task">
     <input id="newTaskDesc" placeholder="New task...">
     <select id="newTaskAgent">${names.map(n=>`<option value="${n}">${n}</option>`).join('')}</select>
