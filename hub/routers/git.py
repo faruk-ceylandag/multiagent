@@ -31,10 +31,10 @@ def git_add_safe(d, files=None):
 
 # ── Git Panel ──
 @router.get("/git/branches")
-def git_branches(project: str = ""):
+def git_branches(project: str = "", workspace: str = ""):
     result = {}
     if project:
-        d = safe_project_dir(project)
+        d = safe_project_dir(project, workspace_id=workspace if workspace else None)
         dirs = [d] if d else []
     else:
         dirs = [os.path.join(WORKSPACE, d) for d in os.listdir(WORKSPACE)
@@ -56,8 +56,8 @@ def git_branches(project: str = ""):
     return result
 
 @router.get("/git/log")
-def git_log(project: str = "", n: int = 10):
-    d = safe_project_dir(project) if project else WORKSPACE
+def git_log(project: str = "", n: int = 10, workspace: str = ""):
+    d = safe_project_dir(project, workspace_id=workspace if workspace else None) if project else WORKSPACE
     ok, out = git_cmd(["log", "--oneline", f"-{n}", "--format=%h|%s|%an|%ar"], d)
     if not ok:
         return []
@@ -176,10 +176,10 @@ def git_push_api(data: dict):
     return {"status": "error", "message": f"Push failed: {out[:200]}"}
 
 @router.get("/git/status")
-def git_status(project: str = ""):
+def git_status(project: str = "", workspace: str = ""):
     result = {}
     if project:
-        d = safe_project_dir(project)
+        d = safe_project_dir(project, workspace_id=workspace if workspace else None)
         dirs = [d] if d else []
     else:
         dirs = [os.path.join(WORKSPACE, d) for d in os.listdir(WORKSPACE)
@@ -193,6 +193,103 @@ def git_status(project: str = ""):
             "status": out[:500] if ok else ""
         }
     return result
+
+@router.get("/git/diff")
+def git_diff_api(project: str = "", branch: str = "", workspace: str = ""):
+    """Get unified diff for a project/branch."""
+    d = safe_project_dir(project, workspace_id=workspace if workspace else None) if project else WORKSPACE
+    if not d:
+        return {"status": "error", "message": "Invalid project"}
+    if not os.path.isdir(os.path.join(d, ".git")):
+        return {"status": "error", "message": "No git repo"}
+
+    # Determine diff target
+    if branch:
+        ok, diff = git_cmd(["diff", f"main...{branch}"], d)
+        if not ok:
+            ok, diff = git_cmd(["diff", f"master...{branch}"], d)
+    else:
+        ok, diff = git_cmd(["diff"], d)
+
+    if not ok:
+        diff = ""
+
+    # Also get stat summary
+    if branch:
+        _, stat = git_cmd(["diff", "--stat", f"main...{branch}"], d)
+        if not stat:
+            _, stat = git_cmd(["diff", "--stat", f"master...{branch}"], d)
+    else:
+        _, stat = git_cmd(["diff", "--stat"], d)
+
+    # Changed files list
+    if branch:
+        _, files_raw = git_cmd(["diff", "--name-status", f"main...{branch}"], d)
+        if not files_raw:
+            _, files_raw = git_cmd(["diff", "--name-status", f"master...{branch}"], d)
+    else:
+        _, files_raw = git_cmd(["diff", "--name-status"], d)
+
+    files = []
+    if files_raw:
+        for line in files_raw.strip().split("\n"):
+            parts = line.split("\t", 1)
+            if len(parts) >= 2:
+                files.append({"status": parts[0], "path": parts[1]})
+
+    return {
+        "diff": diff[:50000],  # Cap at 50KB
+        "stat": stat or "",
+        "files": files,
+        "project": project,
+        "branch": branch,
+    }
+
+
+@router.post("/git/pr")
+def git_create_pr(data: dict):
+    """Create a GitHub pull request."""
+    project = data.get("project", "")
+    title = data.get("title", "").strip()
+    body = data.get("body", "").strip()
+    branch = data.get("branch", "")
+    base = data.get("base", "main")
+    workspace = data.get("workspace", "")
+
+    d = safe_project_dir(project, workspace_id=workspace if workspace else None)
+    if not d:
+        return {"status": "error", "message": "Invalid project"}
+
+    if not branch:
+        _, branch = git_cmd(["branch", "--show-current"], d)
+    if not branch:
+        return {"status": "error", "message": "No branch"}
+    if not title:
+        title = branch.replace("feature/", "").replace("-", " ").replace("_", " ").title()
+
+    # First push the branch
+    ok, out = git_cmd(["push", "-u", "origin", branch], d)
+    if not ok:
+        return {"status": "error", "message": f"Push failed: {out[:200]}"}
+
+    # Create PR using gh CLI
+    import subprocess
+    try:
+        cmd = ["gh", "pr", "create", "--title", title, "--body", body or title,
+               "--base", base, "--head", branch]
+        r = subprocess.run(cmd, cwd=d, capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            pr_url = r.stdout.strip()
+            add_activity("user", "system", "git_pr", f"PR created: {pr_url}")
+            bump_version()
+            return {"status": "ok", "url": pr_url, "branch": branch}
+        else:
+            return {"status": "error", "message": r.stderr[:200] or "PR creation failed"}
+    except FileNotFoundError:
+        return {"status": "error", "message": "gh CLI not found (install: brew install gh)"}
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "message": "PR creation timed out"}
+
 
 # ── Changes ──
 @router.post("/changes")

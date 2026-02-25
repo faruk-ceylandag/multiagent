@@ -1,5 +1,6 @@
 """Message routes: send, consume, dismiss, broadcast, chat, sessions."""
 
+import logging
 from datetime import datetime
 from fastapi import APIRouter
 
@@ -10,6 +11,8 @@ from hub.state import (
     rate_ok, add_activity, save_state, send_notification, WORKSPACE,
     bump_version,
 )
+
+_log = logging.getLogger("hub.messages")
 
 router = APIRouter(tags=["messages"])
 
@@ -39,6 +42,12 @@ def get_chat_messages(name: str):
 def send_message(msg: Message):
     if len(msg.content) > 100000:
         msg.content = msg.content[:100000]
+
+    # Flags for post-lock auto-plan approval (avoid deadlock with approve_plan)
+    _should_auto_approve = False
+    _auto_plan_id = None
+    _auto_plan_steps = []
+
     with lock:
         if not rate_ok(msg.sender):
             return {"status": "rate_limited"}
@@ -63,34 +72,61 @@ def send_message(msg: Message):
                 "task_id": entry.get("task_id", ""),
             }
             entry["plan_id"] = plan_id
-            # Route to user inbox
+            # Route to user inbox (always, so user sees what happened)
             entry["receiver"] = "user"
             messages.setdefault("user", []).append(entry)
             if len(messages["user"]) > 200:
                 messages["user"] = messages["user"][-150:]
+
+            # Check auto-plan approval config
+            auto_all = _st._cfg.get("auto_plan_approval", False)
+            auto_single = _st._cfg.get("auto_plan_single_step", True)
+            _should_auto_approve = auto_all or (auto_single and len(plan_steps) == 1)
+
             add_activity(msg.sender, "user", "plan_proposal", msg.content[:80])
             bump_version()
             save_state()
-            return {"status": "ok", "plan_id": plan_id}
-
-        if msg.msg_type == "chat" and msg.sender == "user":
-            p = pipeline.get(msg.receiver, {})
-            if p.get("status") in ("working", "booting"):
-                chat_queue.setdefault(msg.receiver, []).append(entry)
+            if _should_auto_approve and plan_steps:
+                # Set flags for post-lock auto-approval (fall through out of lock)
+                _auto_plan_id = plan_id
+                _auto_plan_steps = list(range(len(plan_steps)))
+            else:
+                return {"status": "ok", "plan_id": plan_id}
+        else:
+            # ── Normal (non-plan) message handling ──
+            if msg.msg_type == "chat" and msg.sender == "user":
+                p = pipeline.get(msg.receiver, {})
+                if p.get("status") in ("working", "booting"):
+                    chat_queue.setdefault(msg.receiver, []).append(entry)
+                    messages.setdefault("user", []).append(entry)
+                    add_activity(msg.sender, msg.receiver, "chat", msg.content[:80])
+                    return {"status": "ok", "queued": "chat"}
+            messages.setdefault(msg.receiver, []).append(entry)
+            # Trim receiver queue to prevent unbounded growth
+            if len(messages[msg.receiver]) > 200:
+                messages[msg.receiver] = messages[msg.receiver][-150:]
+            if msg.sender == "user" and msg.receiver != "user":
                 messages.setdefault("user", []).append(entry)
-                add_activity(msg.sender, msg.receiver, "chat", msg.content[:80])
-                return {"status": "ok", "queued": "chat"}
-        messages.setdefault(msg.receiver, []).append(entry)
-        # Trim receiver queue to prevent unbounded growth
-        if len(messages[msg.receiver]) > 200:
-            messages[msg.receiver] = messages[msg.receiver][-150:]
-        if msg.sender == "user" and msg.receiver != "user":
-            messages.setdefault("user", []).append(entry)
-            if len(messages["user"]) > 200:
-                messages["user"] = messages["user"][-150:]
-        add_activity(msg.sender, msg.receiver, msg.msg_type, msg.content[:80])
-        from hub.state import add_audit
-        add_audit(msg.sender, "message_send", {"receiver": msg.receiver, "type": msg.msg_type})
+                if len(messages["user"]) > 200:
+                    messages["user"] = messages["user"][-150:]
+            add_activity(msg.sender, msg.receiver, msg.msg_type, msg.content[:80])
+            from hub.state import add_audit
+            add_audit(msg.sender, "message_send", {"receiver": msg.receiver, "type": msg.msg_type})
+
+    # ── Auto-approve plan (outside lock to avoid deadlock with approve_plan) ──
+    if _should_auto_approve and _auto_plan_id is not None:
+        try:
+            from hub.routers.tasks import approve_plan
+            result = approve_plan({
+                "plan_id": _auto_plan_id,
+                "selected_steps": _auto_plan_steps,
+            })
+            _log.info("Auto-approved plan #%d: %s", _auto_plan_id, result)
+            return {"status": "ok", "plan_id": _auto_plan_id, "auto_approved": True}
+        except Exception as exc:
+            _log.warning("Auto-approve plan #%d failed: %s", _auto_plan_id, exc)
+        return {"status": "ok", "plan_id": _auto_plan_id}
+
     if msg.receiver == "user":
         save_state()
     if msg.sender == "user":

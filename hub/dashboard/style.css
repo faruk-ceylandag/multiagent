@@ -66,6 +66,21 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .top-spacer { flex:1; }
 #panel { flex:1; overflow-y:auto; padding:12px; }
 
+/* ── Workspace Bar ── */
+#workspaceBar { display:flex; gap:4px; padding:6px 12px; border-bottom:1px solid var(--border); align-items:center; background:var(--bg2); flex-wrap:wrap; }
+.ws-tab { padding:4px 12px; border:1px solid var(--border); background:none; color:var(--fg2); cursor:pointer; border-radius:6px; font-size:11px; white-space:nowrap; transition:all .15s; }
+.ws-tab:hover { background:var(--bg3); color:var(--fg); }
+.ws-tab.ws-active { background:var(--ac); color:#fff; border-color:var(--ac); }
+.ws-add { border-style:dashed; }
+.ws-add:hover { border-color:var(--ac); color:var(--ac); }
+/* ── Settings Panel ── */
+.settings-panel { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px; }
+.settings-grid { display:flex; flex-direction:column; gap:8px; }
+.setting-row { display:flex; align-items:center; gap:8px; font-size:12px; flex-wrap:wrap; }
+.setting-row input[type="checkbox"] { width:16px; height:16px; accent-color:var(--ac); }
+.setting-row input[type="number"] { padding:4px 8px; background:var(--bg); border:1px solid var(--border); border-radius:4px; color:var(--fg); font-size:12px; }
+.setting-row .text-dim { font-size:10px; color:var(--fg3); flex-basis:100%; padding-left:24px; }
+
 /* ── Command Bar ── */
 .cmd-bar { display:flex; gap:6px; padding:8px 12px; border-top:1px solid var(--border); align-items:flex-end; }
 .cmd-bar textarea { flex:1; padding:7px 10px; background:var(--bg2); border:1px solid var(--border); border-radius:6px; color:var(--fg); font-size:12px; font-family:inherit; resize:none; min-height:34px; max-height:160px; overflow-y:auto; line-height:1.4; }
@@ -327,10 +342,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 
 /* Review diff */
 .review-diff { font-family:monospace; font-size:10px; background:var(--bg); border:1px solid var(--border); border-radius:4px; padding:8px; margin-top:4px; max-height:300px; overflow:auto; }
-.diff-file { color:var(--fg3); font-weight:500; }
-.diff-hunk { color:var(--ac); }
-.diff-add { color:var(--green); }
-.diff-del { color:var(--red); }
+/* ── Diff Viewer ── */
+.diff-file { color:var(--fg); font-weight:600; padding:4px 0; border-bottom:1px solid var(--border); }
+.diff-hunk { color:var(--cyan); background:rgba(57,211,83,0.05); padding:2px 4px; margin:4px 0; }
+.diff-add { color:var(--green); background:rgba(63,185,80,0.08); }
+.diff-del { color:var(--red); background:rgba(248,81,73,0.08); }
 
 /* Review request bubble */
 .review-request-bubble { max-width:90% !important; }

@@ -11,6 +11,7 @@ from .health import router as health_router
 from .websocket import router as ws_router
 from .patterns import router as patterns_router
 from .cache import router as cache_router
+from .workspaces import router as workspaces_router
 
 all_routers = [
     agents_router,
@@ -25,4 +26,5 @@ all_routers = [
     ws_router,
     patterns_router,
     cache_router,
+    workspaces_router,
 ]

@@ -3,11 +3,52 @@
 Multi-Agent System — by Ö. Faruk Ceylandağ
 Usage: python3 start.py [/path/to/workspace]
 """
-import os, sys, time, shutil, subprocess, signal, json, socket
+import os, sys, time, shutil, subprocess, signal, json, socket, argparse
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WORKSPACE = os.path.realpath(sys.argv[1] if len(sys.argv) > 1 else os.getcwd())
 sys.path.insert(0, SCRIPT_DIR)
+
+_parser = argparse.ArgumentParser(description="Multi-Agent System", add_help=False)
+_parser.add_argument("workspace", nargs="?", default="")
+_parser.add_argument("--standalone", action="store_true", help="Run with central MA_DIR (~/.multiagent/)")
+_parser.add_argument("--add-workspace", metavar="PATH", help="Add workspace to running hub")
+_parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
+_args, _extra = _parser.parse_known_args()
+
+# Handle --add-workspace (just POST to hub and exit)
+if _args.add_workspace:
+    import urllib.request
+    _path = os.path.realpath(_args.add_workspace)
+    # Find running hub port
+    _port_file = os.path.expanduser("~/.multiagent/.hub.port")
+    if not os.path.exists(_port_file):
+        _port_file = os.path.join(os.getcwd(), ".multiagent", ".hub.port")
+    _port = 8040
+    if os.path.exists(_port_file):
+        with open(_port_file) as f:
+            _port = int(f.read().strip())
+    try:
+        payload = json.dumps({"path": _path}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{_port}/workspaces/add",
+                                      data=payload, headers={"Content-Type": "application/json"})
+        resp = json.loads(urllib.request.urlopen(req, timeout=5).read())
+        if resp.get("status") == "ok":
+            print(f"  \u2713 Workspace added: {_path} (id: {resp.get('ws_id')})")
+            print(f"    Projects: {', '.join(resp.get('projects', []))}")
+        else:
+            print(f"  \u2717 {resp.get('message', 'Failed')}")
+    except Exception as e:
+        print(f"  \u2717 Could not reach hub: {e}")
+    sys.exit(0)
+
+if _args.standalone:
+    _central_dir = os.path.expanduser("~/.multiagent")
+    os.makedirs(_central_dir, exist_ok=True)
+    WORKSPACE = _central_dir
+elif _args.workspace:
+    WORKSPACE = os.path.realpath(_args.workspace)
+else:
+    WORKSPACE = os.path.realpath(os.getcwd())
 
 from lib.config import load_config, scan_projects, detect_stack, save_default_config
 
@@ -29,7 +70,35 @@ for ra in _REVIEWER_AGENTS:
 cfg["agents"] = AGENTS
 
 AGENT_NAMES = [a["name"] if isinstance(a, dict) else a for a in AGENTS]
-MA_DIR = os.path.join(WORKSPACE, ".multiagent")
+if _args.standalone:
+    MA_DIR = os.path.expanduser("~/.multiagent")
+else:
+    MA_DIR = os.path.join(WORKSPACE, ".multiagent")
+
+# ── Daemon mode ──
+if _args.daemon:
+    # Fork and detach from terminal
+    try:
+        pid = os.fork()
+        if pid > 0:
+            # Parent process — print PID and exit
+            print(f"  Multi-Agent daemon started (PID {pid})")
+            print(f"  Logs: {os.path.join(MA_DIR, 'logs', 'hub.log')}")
+            sys.exit(0)
+    except OSError as e:
+        print(f"  Fork failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    # Child process — become session leader
+    os.setsid()
+    # Redirect stdout/stderr to log file
+    os.makedirs(os.path.join(MA_DIR, "logs"), exist_ok=True)
+    _daemon_log = os.path.join(MA_DIR, "logs", "daemon.log")
+    _daemon_fd = open(_daemon_log, "a")
+    os.dup2(_daemon_fd.fileno(), sys.stdout.fileno())
+    os.dup2(_daemon_fd.fileno(), sys.stderr.fileno())
+    # Write daemon PID file
+    with open(os.path.join(MA_DIR, ".daemon.pid"), "w") as f:
+        f.write(str(os.getpid()))
 
 G = "\033[0;32m"; R = "\033[0;31m"; B = "\033[0;34m"
 BOLD = "\033[1m"; NC = "\033[0m"; DIM = "\033[2m"; Y = "\033[0;33m"
@@ -418,7 +487,7 @@ def cleanup(sig=None, frame=None):
     try: hub_log.close()
     except OSError: pass
     # Clean up PID/port files
-    for pf in [".hub.pid", ".hub.port"]:
+    for pf in [".hub.pid", ".hub.port", ".daemon.pid"]:
         try: os.remove(os.path.join(MA_DIR, pf))
         except OSError: pass
     print(f"{G}✓ All stopped{NC}")

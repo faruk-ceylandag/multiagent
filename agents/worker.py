@@ -34,6 +34,26 @@ from .learning import (read_file, load_skills, run_hook, load_template,
 from .hub_client import get_relevant_patterns, get_peer_learnings
 
 
+def _fetch_workspaces(ctx):
+    """Fetch registered workspaces from hub."""
+    try:
+        resp = hub_get(ctx, "/workspaces")
+        if isinstance(resp, list):
+            ctx._workspaces = {}
+            for ws in resp:
+                ws_id = ws.get("ws_id", "")
+                if ws_id and not ws.get("is_primary"):
+                    ctx._workspaces[ws_id] = {
+                        "path": ws.get("path", ""),
+                        "name": ws.get("name", ""),
+                        "projects": ws.get("projects", []),
+                        "stacks": ws.get("stacks", {}),
+                    }
+            ctx._workspace_refresh_at = time.time()
+    except Exception:
+        pass
+
+
 def _setup_stop_signal(ctx):
     """Setup SIGUSR1 handler for instant stop."""
     def _handle_sigusr1(signum, frame):
@@ -361,6 +381,7 @@ if _boot_role:
     if not _role_summary:
         _role_summary = _boot_role.split("\n")[0].strip().lstrip("#").strip()[:200]
 hub_post(ctx, "/agents/register", {"agent_name": ctx.AGENT_NAME, "status": "alive", "role": _role_summary, "pid": os.getpid()})
+_fetch_workspaces(ctx)
 
 # CLI health check
 try:
@@ -404,6 +425,11 @@ while True:
             poll_interval = 2
         # Add jitter to prevent thundering herd
         time.sleep(poll_interval + random.uniform(0, 1))
+
+        # Refresh workspaces periodically
+        if time.time() - ctx._workspace_refresh_at > 60:
+            _fetch_workspaces(ctx)
+
         poll_resp = hub_post(ctx, f"/poll/{ctx.AGENT_NAME}", {}, timeout=5)
         if not poll_resp:
             if is_degraded():
@@ -658,6 +684,15 @@ while True:
             _td = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
             if _td and isinstance(_td, dict) and _td.get("_review_parent_id"):
                 ctx._review_parent_id = str(_td["_review_parent_id"])
+
+        # Resolve workspace for task
+        for m in msgs:
+            task_workspace = m.get("workspace", "") or ""
+            if task_workspace:
+                ws_path = ctx.get_workspace_path(task_workspace)
+                if ws_path and ws_path != ctx.WORKSPACE:
+                    log(ctx, f"📁 Task workspace: {ws_path}")
+                break
 
         # Auto-create kanban task (skip for reviewer agents with a review subtask)
         _is_reviewer = ctx.AGENT_NAME.startswith("reviewer-")

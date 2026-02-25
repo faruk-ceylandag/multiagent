@@ -216,6 +216,11 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
             # Give access to project dir via --add-dir
             if effective_cwd != ctx.AGENT_CWD and os.path.isdir(effective_cwd):
                 cmd.extend(["--add-dir", effective_cwd])
+            # Multi-workspace: add extra directories
+            extra_dirs = getattr(ctx, '_extra_dirs', [])
+            for d in extra_dirs:
+                if os.path.isdir(d):
+                    cmd.extend(["--add-dir", d])
             if ctx.valid_sid(ctx.SESSION_ID):
                 cmd.extend(["--resume", ctx.SESSION_ID])
             cmd.extend(["-p", prompt])

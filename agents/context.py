@@ -78,6 +78,10 @@ class AgentContext:
         # ── Review subtask tracking ──
         self._review_parent_id = None  # Parent task ID when this agent is working on a review subtask
 
+        # ── Multi-workspace support ──
+        self._workspaces = {}  # {ws_id: {path, name, projects, stacks}}
+        self._workspace_refresh_at = 0  # timestamp of last workspace list refresh
+
         # ── Inbox peek (mid-task notification) ──
         self._inbox_count_at_task_start = 0
         self._mid_task_notified = False
@@ -92,3 +96,10 @@ class AgentContext:
     def reset_eco_tracking(self):
         """Reset per-task tracking (call at start of each task)."""
         self._eco_reported = set()
+
+    def get_workspace_path(self, workspace_id):
+        """Get filesystem path for a workspace ID."""
+        if not workspace_id or workspace_id == "primary":
+            return self.WORKSPACE
+        ws = self._workspaces.get(workspace_id, {})
+        return ws.get("path", self.WORKSPACE)

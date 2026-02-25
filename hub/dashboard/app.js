@@ -7,6 +7,7 @@ let reviewSelections = new Map(); // Map<changeId, Set<filePath>>
 let planSelections = new Map(); // Map<planId, Set<stepIndex>> — tracks which plan steps are selected
 let logLines = {}, logSearch = '', soundOn = false, notifOn = false;
 let mergedMode = false, _inboxAgent = '';
+let activeWorkspace = 'all';
 let _prevTaskStatuses = {};
 let _ws = null, _wsRetries = 0, _wsMaxRetries = 10, _wsConnected = false;
 let _httpPollTimer = null;
@@ -194,6 +195,11 @@ function _applyDashboardData(d) {
   _lastTaskHash = taskHash;
   if (d.version) _lastVersion = d.version;
   data = d;
+  if (!data._config) fetchConfig();
+  // Render workspace bar if multiple workspaces
+  if (d.workspaces && Object.keys(d.workspaces).length > 0) {
+    renderWorkspaceBar(d.workspaces);
+  }
   const names = d.agent_names || [];
   if (d.inbox && Array.isArray(d.inbox)) {
     const prev = inbox.length;
@@ -993,7 +999,14 @@ function renderAlerts(p) {
 let taskSearch='', taskFilterAgent='', taskFilterPriority='';
 
 function renderTasks(p){
-  const allTasks=data.tasks||[];const names=data.agent_names||[];
+  let taskList=data.tasks||[];
+  if(activeWorkspace!=='all'){
+    taskList=taskList.filter(t=>{
+      if(activeWorkspace==='primary')return !t.workspace||t.workspace==='';
+      return t.workspace===activeWorkspace;
+    });
+  }
+  const allTasks=taskList;const names=data.agent_names||[];
   // Apply filters
   let tasks=allTasks;
   if(taskSearch){const q=taskSearch.toLowerCase();tasks=tasks.filter(t=>(t.description||'').toLowerCase().includes(q)||('#'+t.id).includes(q));}
@@ -1178,7 +1191,13 @@ async function showTaskDetail(id){
         <span style="color:var(--fg2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((st.description||'').substring(0,80))}</span>
       </div>`).join('')}
     </div>`:''}
-    
+
+    ${task.project?`<div style="display:flex;gap:6px;margin:8px 0">
+      <button class="modal-btn-ok" style="font-size:11px;padding:4px 10px" onclick="showTaskDiff(${task.id})">View Diff</button>
+      ${task.branch?`<button class="modal-btn-ok" style="font-size:11px;padding:4px 10px;background:var(--blue)" onclick="createPR('${escAttr(task.project)}','${escAttr(task.branch)}')">Create PR</button>
+      <button class="modal-btn-ok" style="font-size:11px;padding:4px 10px;background:var(--green)" onclick="pushBranch('${escAttr(task.project)}')">Push</button>`:''}
+    </div>`:''}
+
     <div class="modal-actions" style="flex-wrap:wrap;gap:6px">
       ${task.status==='created'?`<select id="_reassign" style="padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:11px">
         ${names.map(n=>`<option value="${esc(n)}"${n===task.assigned_to?' selected':''}>${esc(n)}</option>`).join('')}
@@ -1235,6 +1254,70 @@ async function retryTask(id,agent){
       task_id:String(id),task_external_id:extId,project:project,branch:branch})});
   notify(`↻ Retrying #${id} → ${agent}`);
   setTimeout(poll,300);
+}
+
+async function showTaskDiff(tid) {
+  const task = (data.tasks || []).find(t => t.id == tid);
+  if (!task) return;
+  const project = task.project || '';
+  const branch = task.branch || '';
+  if (!project) { toast('No project associated', 'warn'); return; }
+
+  try {
+    const r = await (await fetch(HUB + '/git/diff?project=' + encodeURIComponent(project) + '&branch=' + encodeURIComponent(branch))).json();
+    if (r.status === 'error') { toast(r.message, 'error'); return; }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+    const filesHtml = (r.files || []).map(f => {
+      const icon = f.status === 'A' ? '+' : f.status === 'D' ? '-' : '~';
+      const cls = f.status === 'A' ? 'diff-add' : f.status === 'D' ? 'diff-del' : '';
+      return '<div class="' + cls + '" style="padding:2px 0">' + icon + ' ' + esc(f.path) + '</div>';
+    }).join('');
+
+    overlay.innerHTML = '<div class="modal-box" style="width:90vw;max-width:900px;max-height:85vh;display:flex;flex-direction:column">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
+      '<h3 style="font-size:14px">Diff — Task #' + tid + ' (' + esc(branch || 'working tree') + ')</h3>' +
+      '<button onclick="this.closest(\'.modal-overlay\').remove()" style="background:none;border:none;color:var(--fg2);cursor:pointer;font-size:16px">✕</button>' +
+      '</div>' +
+      '<div style="display:flex;gap:12px;flex:1;overflow:hidden">' +
+      '<div style="width:200px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border);padding-right:8px">' +
+      '<div style="font-size:11px;font-weight:600;margin-bottom:6px">Files (' + (r.files||[]).length + ')</div>' +
+      '<div style="font-size:11px;font-family:monospace">' + filesHtml + '</div>' +
+      '</div>' +
+      '<div style="flex:1;overflow:auto">' +
+      '<pre style="font-size:11px;font-family:monospace;white-space:pre-wrap;margin:0">' + formatDiff(r.diff || 'No changes') + '</pre>' +
+      '</div></div></div>';
+
+    document.body.appendChild(overlay);
+  } catch (e) { toast('Error loading diff: ' + e, 'error'); }
+}
+
+async function createPR(project, branch) {
+  const title = prompt('PR Title:', branch ? branch.replace('feature/', '').replace(/[-_]/g, ' ') : '');
+  if (!title) return;
+  try {
+    const r = await (await fetch(HUB + '/git/pr', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({project, branch, title})
+    })).json();
+    if (r.status === 'ok') {
+      toast('PR created: ' + r.url, 'success', 6000);
+    } else toast(r.message || 'Failed', 'error');
+  } catch (e) { toast('Error: ' + e, 'error'); }
+}
+
+async function pushBranch(project) {
+  try {
+    const r = await (await fetch(HUB + '/git/push', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({project})
+    })).json();
+    if (r.status === 'ok') toast('Pushed to origin/' + r.branch, 'success');
+    else toast(r.message || 'Push failed', 'error');
+  } catch (e) { toast('Error: ' + e, 'error'); }
 }
 
 async function inboxToTask(sender,content){
@@ -1548,6 +1631,130 @@ async function renderReview(p){
     ${c.diff?`<details class="mt-6"><summary class="text-sm text-dim" style="cursor:pointer">Diff (${c.diff.split('\\n').length} lines)</summary><div class="review-diff">${formatDiff(c.diff||'')}</div></details>`:''}
   </div>`;}).join(''));
 }
+
+// ── Config / Autonomy ──
+async function fetchConfig() {
+  try {
+    data._config = await (await fetch(HUB + '/config')).json();
+  } catch {}
+}
+
+function renderAutonomySettings() {
+  const cfg = data._config || {};
+  return `<div class="settings-panel">
+    <h3 style="font-size:13px;margin-bottom:10px">Autonomy Settings</h3>
+    <div class="settings-grid">
+      <label class="setting-row">
+        <input type="checkbox" id="_autoUat" ${cfg.auto_uat ? 'checked' : ''}>
+        <span>Auto-UAT</span>
+        <span class="text-dim text-xs">Skip manual approval, tasks go directly to done</span>
+      </label>
+      <label class="setting-row">
+        <span>UAT Timeout (sec)</span>
+        <input type="number" id="_uatTimeout" value="${cfg.auto_uat_timeout || 0}" min="0" style="width:80px" class="modal-input">
+        <span class="text-dim text-xs">0 = manual, &gt;0 = auto-approve after N seconds</span>
+      </label>
+      <label class="setting-row">
+        <input type="checkbox" id="_autoPlan" ${cfg.auto_plan_approval ? 'checked' : ''}>
+        <span>Auto-Plan Approval</span>
+        <span class="text-dim text-xs">Approve all plans without user confirmation</span>
+      </label>
+      <label class="setting-row">
+        <input type="checkbox" id="_autoSinglePlan" ${cfg.auto_plan_single_step !== false ? 'checked' : ''}>
+        <span>Auto-Single-Step Plan</span>
+        <span class="text-dim text-xs">Auto-approve plans with a single step</span>
+      </label>
+      <label class="setting-row">
+        <span>Escalation Threshold</span>
+        <input type="number" id="_escalationThreshold" value="${cfg.escalation_threshold || 3}" min="0" style="width:80px" class="modal-input">
+        <span class="text-dim text-xs">Failures before escalating to architect (0 = disabled)</span>
+      </label>
+    </div>
+    <button class="modal-btn-ok" style="margin-top:10px" onclick="saveAutonomySettings()">Save Settings</button>
+  </div>`;
+}
+
+async function saveAutonomySettings() {
+  const payload = {
+    auto_uat: $('_autoUat')?.checked || false,
+    auto_uat_timeout: parseInt($('_uatTimeout')?.value || '0'),
+    auto_plan_approval: $('_autoPlan')?.checked || false,
+    auto_plan_single_step: $('_autoSinglePlan')?.checked || false,
+    escalation_threshold: parseInt($('_escalationThreshold')?.value || '3'),
+  };
+  try {
+    const r = await (await fetch(HUB + '/config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    })).json();
+    if (r.status === 'ok') {
+      toast('Settings saved', 'success');
+      data._config = {...(data._config || {}), ...payload};
+    } else toast('Error: ' + (r.message || 'unknown'), 'error');
+  } catch (e) { toast('Error: ' + e, 'error'); }
+}
+
+// ── Workspace Tabs ──
+function renderWorkspaceBar(workspaces) {
+  const bar = $('workspaceBar');
+  if (!bar) return;
+  const wsList = Object.values(workspaces || {});
+  if (wsList.length <= 0) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  let html = `<button class="ws-tab${activeWorkspace === 'all' ? ' ws-active' : ''}" onclick="switchWorkspace('all')">All</button>`;
+  const wsName = data.workspace ? data.workspace.split('/').pop() : 'primary';
+  html += `<button class="ws-tab${activeWorkspace === 'primary' ? ' ws-active' : ''}" onclick="switchWorkspace('primary')">${esc(wsName)}</button>`;
+  for (const ws of wsList) {
+    const id = ws.ws_id || '';
+    if (!id || ws.is_primary) continue;
+    html += `<button class="ws-tab${activeWorkspace === id ? ' ws-active' : ''}" onclick="switchWorkspace('${escAttr(id)}')">${esc(ws.name || id)}</button>`;
+  }
+  html += `<button class="ws-tab ws-add" onclick="showAddWorkspaceModal()" title="Add workspace">+</button>`;
+  bar.innerHTML = html;
+}
+
+function switchWorkspace(wsId) {
+  activeWorkspace = wsId;
+  renderWorkspaceBar(data.workspaces || {});
+  renderPanel();
+}
+
+function showAddWorkspaceModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  overlay.innerHTML = `<div class="modal-box" style="width:420px">
+    <h3 style="margin-bottom:12px;font-size:14px">Add Workspace</h3>
+    <label class="text-sm text-dim">Path</label>
+    <input id="_wsPath" class="modal-input" placeholder="/path/to/repo">
+    <label class="text-sm text-dim" style="margin-top:8px">Alias (optional)</label>
+    <input id="_wsAlias" class="modal-input" placeholder="my-project">
+    <div class="modal-actions">
+      <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+      <button class="modal-btn-ok" onclick="addWorkspace()">Add</button>
+    </div></div>`;
+  document.body.appendChild(overlay);
+  setTimeout(() => $('_wsPath')?.focus(), 50);
+}
+
+async function addWorkspace() {
+  const path = $('_wsPath')?.value?.trim();
+  const alias = $('_wsAlias')?.value?.trim();
+  if (!path) { toast('Path required', 'warn'); return; }
+  try {
+    const r = await (await fetch(HUB + '/workspaces/add', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path, alias})
+    })).json();
+    if (r.status === 'ok') {
+      toast('Workspace added: ' + (alias || path.split('/').pop()), 'success');
+      document.querySelector('.modal-overlay')?.remove();
+      switchWorkspace(r.ws_id);
+    } else toast(r.message || 'Failed', 'error');
+  } catch (e) { toast('Error: ' + e, 'error'); }
+}
+
 // ── Analytics ──
 async function renderAnalytics(p){
   let an={};try{an=await(await fetch(HUB+'/analytics')).json();}catch{p.innerHTML='<div class="empty-state">📈 Analytics unavailable</div>';return;}
@@ -1559,7 +1766,8 @@ async function renderAnalytics(p){
   const totCost=Object.values(ba).reduce((s,a)=>s+((a.cost||0)*1),0);
   const tests=an.tests||{};
 
-  p.innerHTML=`<div class="analytics-grid">
+  p.innerHTML=`${renderAutonomySettings()}
+  <div class="analytics-grid">
     <div class="stat-card"><div class="stat-label">Tokens</div><div class="stat-value">${formatTokens(totTok)}</div></div>
     <div class="stat-card"><div class="stat-label">API Calls</div><div class="stat-value">${totReq}</div></div>
     <div class="stat-card"><div class="stat-label">Tasks Done</div><div class="stat-value text-green">${an.tasks_done||0}</div><div class="stat-sub">${an.tasks_pending||0} pending</div></div>

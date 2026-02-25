@@ -64,7 +64,14 @@ cat > "$BIN_DIR/ma" << 'MAEOF'
 INSTALL_DIR="${HOME}/.local/share/multiagent"
 # Read port from .hub.port if available, fallback to 8040
 _PORT_FILE="${PWD}/.multiagent/.hub.port"
-[ -f "$_PORT_FILE" ] && _PORT=$(cat "$_PORT_FILE") || _PORT=8040
+_CENTRAL_PORT_FILE="${HOME}/.multiagent/.hub.port"
+if [ -f "$_PORT_FILE" ]; then
+  _PORT=$(cat "$_PORT_FILE")
+elif [ -f "$_CENTRAL_PORT_FILE" ]; then
+  _PORT=$(cat "$_CENTRAL_PORT_FILE")
+else
+  _PORT=8040
+fi
 HUB="http://127.0.0.1:${_PORT}"
 
 case "${1:-start}" in
@@ -174,6 +181,68 @@ except: print('  Hub not running')
     pkill -f "start.py" 2>/dev/null
     echo "  ✓ All stopped"
     ;;
+  add)
+    if [ -z "$2" ]; then echo "Usage: ma add /path/to/repo [alias]"; exit 1; fi
+    _ADD_PATH="$(cd "$2" 2>/dev/null && pwd || echo "$2")"
+    _ALIAS="${3:-}"
+    python3 -c "
+import sys,json
+from urllib.request import Request, urlopen
+try:
+    payload=json.dumps({'path':sys.argv[1],'alias':sys.argv[2]})
+    r=json.loads(urlopen(Request(sys.argv[3]+'/workspaces/add',data=payload.encode(),headers={'Content-Type':'application/json'}),timeout=5).read())
+    if r.get('status')=='ok':
+        print(f'  \u2713 Workspace added (id: {r.get(\"ws_id\")})')
+        print(f'    Projects: {\", \".join(r.get(\"projects\",[]))}')
+    else: print(f'  \u2717 {r.get(\"message\",\"Failed\")}')
+except Exception as e: print(f'  \u2717 {e}')
+" "$_ADD_PATH" "$_ALIAS" "$HUB"
+    ;;
+  workspaces|ws)
+    curl -sf "$HUB/workspaces" 2>/dev/null | python3 -c "
+import sys,json
+try:
+  ws=json.load(sys.stdin)
+  if not ws: print('  No workspaces'); sys.exit()
+  for w in ws:
+    p='\u2605' if w.get('is_primary') else ' '
+    projs=', '.join(w.get('projects',[])[:5]) or '(none)'
+    print(f'  {p} [{w[\"ws_id\"]:8s}] {w.get(\"name\",\"?\"):15s} {w.get(\"path\",\"\")}')
+    print(f'              projects: {projs}')
+except: print('  Hub not running')
+" 2>/dev/null || echo "  Hub not running"
+    ;;
+  remove)
+    if [ -z "$2" ]; then echo "Usage: ma remove <ws_id>"; exit 1; fi
+    curl -sf -X DELETE "$HUB/workspaces/$2" | python3 -c "import sys,json;d=json.load(sys.stdin);print('  \u2713 Removed' if d.get('status')=='ok' else f'  \u2717 {d.get(\"message\",\"Failed\")}')" 2>/dev/null || echo "  Hub not running"
+    ;;
+  daemon)
+    exec python3 "$INSTALL_DIR/start.py" --daemon "${2:-.}"
+    ;;
+  stop-daemon)
+    _PID_FILE="${PWD}/.multiagent/.daemon.pid"
+    _CENTRAL_PID="${HOME}/.multiagent/.daemon.pid"
+    if [ -f "$_PID_FILE" ]; then
+      _PID=$(cat "$_PID_FILE")
+    elif [ -f "$_CENTRAL_PID" ]; then
+      _PID=$(cat "$_CENTRAL_PID")
+    else
+      echo "  No daemon PID file found"
+      exit 1
+    fi
+    if kill -0 "$_PID" 2>/dev/null; then
+      kill "$_PID"
+      echo "  ✓ Daemon stopped (PID $_PID)"
+    else
+      echo "  Daemon not running (stale PID $_PID)"
+    fi
+    rm -f "$_PID_FILE" "$_CENTRAL_PID" 2>/dev/null
+    ;;
+  restart-daemon)
+    "$0" stop-daemon 2>/dev/null
+    sleep 2
+    exec "$0" daemon "${2:-.}"
+    ;;
   help|--help|-h)
     echo "Multi-Agent CLI"
     echo ""
@@ -188,8 +257,14 @@ except: print('  Hub not running')
     echo "  tail [agent]       Follow logs in real-time"
     echo "  tasks              List all tasks"
     echo "  inbox              Show user inbox"
+    echo "  add <path> [alias] Add workspace to running hub"
+    echo "  workspaces|ws      List all workspaces"
+    echo "  remove <ws_id>     Remove workspace from hub"
     echo "  export             Export session report"
     echo "  kill               Stop everything"
+    echo "  daemon [path]      Start as background daemon"
+    echo "  stop-daemon        Stop running daemon"
+    echo "  restart-daemon     Restart daemon"
     echo ""
     echo "Examples:"
     echo "  ma                           # start in current dir"
@@ -197,6 +272,10 @@ except: print('  Hub not running')
     echo "  ma send all 'refactor auth'  # broadcast to all"
     echo "  ma stop frontend             # cancel frontend task"
     echo "  ma tail qa                   # follow QA logs"
+    echo "  ma add ~/other-repo myrepo   # add workspace"
+    echo "  ma ws                        # list workspaces"
+    echo "  ma daemon                    # start as daemon"
+    echo "  ma stop-daemon               # stop the daemon"
     ;;
   *)
     echo "Unknown command: $1 (try: ma help)"

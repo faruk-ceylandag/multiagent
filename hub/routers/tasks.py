@@ -9,6 +9,7 @@ from hub.state import (
     analytics_log, MAX_ANALYTICS, add_activity, save_state, send_notification,
     messages, bump_version, pending_plans, logger, file_locks,
     task_comments, task_reviews, HIDDEN_AGENTS, STATUS_MIGRATION, MAX_REWORK_LOOPS,
+    _cfg,
 )
 
 MAX_REWORK_ITERATIONS = 5
@@ -68,6 +69,7 @@ def create_task(data: dict):
             "depends_on": deps,
             "project": data.get("project", ""),
             "branch": data.get("branch", ""),
+            "workspace": data.get("workspace", ""),
             "task_external_id": data.get("task_external_id", ""),
             "parent_id": data.get("parent_id", None),
             "priority": data.get("priority", 5),
@@ -195,13 +197,27 @@ def update_task(tid: int, data: dict):
             if tasks[tid].get("skip_review"):
                 # Skip code review → go to in_testing (or uat if skip_qa too)
                 if tasks[tid].get("skip_qa"):
-                    tasks[tid]["status"] = "uat"
-                    ts = datetime.now().isoformat()
-                    messages.setdefault("user", []).append({
-                        "sender": "system", "receiver": "user",
-                        "content": f"Task #{tid} skipped review+QA → moved to UAT.",
-                        "msg_type": "info", "timestamp": ts,
-                    })
+                    if _cfg.get("auto_uat", False):
+                        tasks[tid]["status"] = "done"
+                        tasks[tid]["completed_at"] = datetime.now().isoformat()
+                        ts = datetime.now().isoformat()
+                        messages.setdefault("user", []).append({
+                            "sender": "system", "receiver": "user",
+                            "content": f"Task #{tid} skipped review+QA → auto-UAT approved → done.",
+                            "msg_type": "info", "timestamp": ts,
+                        })
+                        add_activity("system", tasks[tid].get("assigned_to", "?"), "auto_uat",
+                                     f"Task #{tid} auto-UAT approved (skip_review+skip_qa)")
+                        _auto_notify_dependents(tid)
+                    else:
+                        tasks[tid]["status"] = "uat"
+                        tasks[tid]["_uat_entered_at"] = datetime.now().isoformat()
+                        ts = datetime.now().isoformat()
+                        messages.setdefault("user", []).append({
+                            "sender": "system", "receiver": "user",
+                            "content": f"Task #{tid} skipped review+QA → moved to UAT.",
+                            "msg_type": "info", "timestamp": ts,
+                        })
                 else:
                     tasks[tid]["status"] = "in_testing"
                     tasks[tid]["_testing_started_at"] = datetime.now().isoformat()
@@ -216,6 +232,35 @@ def update_task(tid: int, data: dict):
             _check_plan_parent_completion(tid)
         elif new_status == "failed" and old_status != "failed":
             _auto_notify_blocker(tid)
+            # Failure escalation
+            _failure_count = tasks[tid].get("_failure_count", 0) + 1
+            tasks[tid]["_failure_count"] = _failure_count
+            threshold = _cfg.get("escalation_threshold", 3)
+            if threshold > 0 and _failure_count >= threshold and "architect" in ALL_AGENTS:
+                ts = datetime.now().isoformat()
+                desc = tasks[tid].get("description", "")[:200]
+                agent = tasks[tid].get("assigned_to", "?")
+                messages.setdefault("architect", []).append({
+                    "sender": "system", "receiver": "architect",
+                    "content": f"ESCALATION — Task #{tid} failed {_failure_count} times\n"
+                               f"Assigned to: {agent}\n"
+                               f"Description: {desc}\n\n"
+                               f"This task has failed {_failure_count} times (threshold: {threshold}). "
+                               f"Please analyze the problem and propose a different approach.",
+                    "msg_type": "task", "task_id": str(tid),
+                    "timestamp": ts,
+                })
+                messages.setdefault("user", []).append({
+                    "sender": "system", "receiver": "user",
+                    "content": f"⚠️ Task #{tid} failed {_failure_count} times — escalated to architect.",
+                    "msg_type": "blocker", "timestamp": ts,
+                })
+                add_activity("system", "architect", "escalation",
+                             f"Task #{tid} escalated after {_failure_count} failures")
+
+        # Track UAT entry time for timeout feature
+        if new_status == "uat" and old_status != "uat":
+            tasks[tid]["_uat_entered_at"] = datetime.now().isoformat()
 
         save_state()
     return {"status": "ok"}
@@ -437,14 +482,33 @@ def _dispatch_qa(tid):
         return
     qa_agent = next((a for a in ALL_AGENTS if _is_qa_agent(a) and a not in HIDDEN_AGENTS), None)
     if not qa_agent:
-        # No QA agent → skip to UAT
-        task["status"] = "uat"
-        ts = datetime.now().isoformat()
-        messages.setdefault("user", []).append({
-            "sender": "system", "receiver": "user",
-            "content": f"Task #{tid} passed code review (3/3 approved). No QA agent found — moved to UAT for your approval.",
-            "msg_type": "info", "timestamp": ts,
-        })
+        # No QA agent → skip to UAT (or done if auto_uat)
+        if _cfg.get("auto_uat", False):
+            task["status"] = "done"
+            task["completed_at"] = datetime.now().isoformat()
+            ts = datetime.now().isoformat()
+            analytics_log.append({
+                "task_id": tid, "agent": task.get("assigned_to", ""),
+                "status": "done", "started": task.get("started_at", ""),
+                "completed": task["completed_at"],
+            })
+            messages.setdefault("user", []).append({
+                "sender": "system", "receiver": "user",
+                "content": f"Task #{tid} passed code review. No QA agent — auto-UAT approved → done.",
+                "msg_type": "info", "timestamp": ts,
+            })
+            add_activity("system", task.get("assigned_to", "?"), "auto_uat",
+                         f"Task #{tid} auto-UAT approved (no QA agent)")
+            _auto_notify_dependents(tid)
+        else:
+            task["status"] = "uat"
+            task["_uat_entered_at"] = datetime.now().isoformat()
+            ts = datetime.now().isoformat()
+            messages.setdefault("user", []).append({
+                "sender": "system", "receiver": "user",
+                "content": f"Task #{tid} passed code review (3/3 approved). No QA agent found — moved to UAT for your approval.",
+                "msg_type": "info", "timestamp": ts,
+            })
         bump_version()
         return
 
@@ -956,15 +1020,36 @@ def submit_review(tid: int, data: dict):
                     "msg_type": "info", "timestamp": ts,
                 })
                 if tasks[tid].get("skip_qa"):
-                    tasks[tid]["status"] = "uat"
-                    add_activity("system", tasks[tid].get("assigned_to", "?"), "qa_skipped",
-                                 f"QA #{tid} skipped (skip_qa flag)")
-                    ts_qa = datetime.now().isoformat()
-                    messages.setdefault("user", []).append({
-                        "sender": "system", "receiver": "user",
-                        "content": f"✅ Task #{tid} code review passed. QA skipped → moved to UAT.",
-                        "msg_type": "info", "timestamp": ts_qa,
-                    })
+                    if _cfg.get("auto_uat", False):
+                        tasks[tid]["status"] = "done"
+                        tasks[tid]["completed_at"] = datetime.now().isoformat()
+                        add_activity("system", tasks[tid].get("assigned_to", "?"), "qa_skipped",
+                                     f"QA #{tid} skipped (skip_qa flag)")
+                        add_activity("system", tasks[tid].get("assigned_to", "?"), "auto_uat",
+                                     f"Task #{tid} auto-UAT approved (skip_qa)")
+                        ts_qa = datetime.now().isoformat()
+                        analytics_log.append({
+                            "task_id": tid, "agent": tasks[tid].get("assigned_to", ""),
+                            "status": "done", "started": tasks[tid].get("started_at", ""),
+                            "completed": tasks[tid]["completed_at"],
+                        })
+                        messages.setdefault("user", []).append({
+                            "sender": "system", "receiver": "user",
+                            "content": f"✅ Task #{tid} code review passed. QA skipped → auto-UAT approved → done.",
+                            "msg_type": "info", "timestamp": ts_qa,
+                        })
+                        _auto_notify_dependents(tid)
+                    else:
+                        tasks[tid]["status"] = "uat"
+                        tasks[tid]["_uat_entered_at"] = datetime.now().isoformat()
+                        add_activity("system", tasks[tid].get("assigned_to", "?"), "qa_skipped",
+                                     f"QA #{tid} skipped (skip_qa flag)")
+                        ts_qa = datetime.now().isoformat()
+                        messages.setdefault("user", []).append({
+                            "sender": "system", "receiver": "user",
+                            "content": f"✅ Task #{tid} code review passed. QA skipped → moved to UAT.",
+                            "msg_type": "info", "timestamp": ts_qa,
+                        })
                 else:
                     _dispatch_qa(tid)
             else:

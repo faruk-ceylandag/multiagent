@@ -92,6 +92,7 @@ MAX_ANALYTICS = 1000
 rate_limited_agents: Dict[str, float] = {}
 sse_clients: Dict[str, int] = {}
 agent_progress: Dict[str, dict] = {}
+workspace_registry: Dict[str, dict] = {}  # {ws_id: {path, name, projects, stacks, added_at, active}}
 test_results: List[dict] = []
 agent_specialization: Dict[str, dict] = {}
 agent_learnings: List[dict] = []
@@ -493,6 +494,7 @@ def _do_save():
             "task_comments": dict(task_comments),
             "task_reviews": dict(task_reviews),
             "comment_counter": _comment_counter,
+            "workspace_registry": dict(workspace_registry),
         }
         # Atomic write: temp file + rename
         tmp = STATE_FILE + ".tmp"
@@ -536,7 +538,7 @@ def load_state():
     global test_results, agent_specialization, agent_learnings
     global pattern_registry, _pattern_id_counter
     global pending_plans, _plan_counter, cache_registry
-    global task_comments, task_reviews, _comment_counter
+    global task_comments, task_reviews, _comment_counter, workspace_registry
     if not STATE_FILE or not os.path.exists(STATE_FILE):
         return
     try:
@@ -587,6 +589,7 @@ def load_state():
         task_comments.update(s.get("task_comments", {}))
         task_reviews.update(s.get("task_reviews", {}))
         _comment_counter = s.get("comment_counter", 0)
+        workspace_registry.update(s.get("workspace_registry", {}))
         # ── Migrate legacy task statuses ──
         for tid, task in tasks.items():
             old_status = task.get("status", "")
@@ -654,6 +657,7 @@ def reset_session():
                         open(lf, "w").close()
                     except OSError:
                         pass
+        # NOTE: workspace_registry is NOT cleared — workspaces persist across sessions
         bump_version()
         save_state()
         logger.info("Session reset: cleared agents, logs, messages; reset stale tasks to to_do")
@@ -807,17 +811,22 @@ def git_cmd(args, cwd=None):
         logger.warning(f"Git command error {args}: {e}")
         return False, ""
 
-def safe_project_dir(project):
+def safe_project_dir(project, workspace_id=None):
+    """Resolve project to absolute directory path, optionally within a specific workspace."""
     if not project:
         return None
-    # Single-project workspace: "." means WORKSPACE itself
+    ws_path = WORKSPACE
+    if workspace_id and workspace_id in workspace_registry:
+        ws_path = workspace_registry[workspace_id].get("path", WORKSPACE)
+    # Single-project workspace: "." means workspace itself
     if project == ".":
-        return WORKSPACE or None
+        return ws_path or None
     clean = os.path.basename(project.replace("\\", "/"))
     if not clean or clean.startswith(".") or ".." in clean:
         return None
-    d = os.path.join(WORKSPACE, clean)
-    if not os.path.realpath(d).startswith(os.path.realpath(WORKSPACE)):
+    d = os.path.join(ws_path, clean)
+    # Validate path is under the workspace
+    if not os.path.realpath(d).startswith(os.path.realpath(ws_path)):
         return None
     return d
 
@@ -946,6 +955,7 @@ def _build_dashboard_data():
         "pending_plans": dict(pending_plans),
         "task_comments": dict(task_comments),
         "task_reviews": dict(task_reviews),
+        "workspaces": dict(workspace_registry),
         "analytics": {
             "by_agent": by_agent, "durations": durations,
             "total_tasks": len(tasks_snap_dict),
@@ -1017,18 +1027,67 @@ def _review_timeout_timer():
                     try:
                         started_time = datetime.fromisoformat(started)
                         if (now - started_time).total_seconds() > 1200:  # 20 min
-                            task["status"] = "uat"
                             task.pop("_testing_started_at", None)
-                            messages.setdefault("user", []).append({
-                                "sender": "system", "receiver": "user",
-                                "content": f"Task #{tid} QA testing timed out (20 min). Moved to UAT for manual review.",
-                                "msg_type": "info", "timestamp": now.isoformat(),
-                            })
-                            add_activity("system", task.get("assigned_to", "?"), "testing_timeout",
-                                         f"QA testing #{tid} timed out (20 min) → UAT")
+                            if _cfg.get("auto_uat", False):
+                                task["status"] = "done"
+                                task["completed_at"] = now.isoformat()
+                                analytics_log.append({
+                                    "task_id": tid, "agent": task.get("assigned_to", ""),
+                                    "status": "done", "started": task.get("started_at", ""),
+                                    "completed": task["completed_at"],
+                                })
+                                messages.setdefault("user", []).append({
+                                    "sender": "system", "receiver": "user",
+                                    "content": f"Task #{tid} QA testing timed out (20 min). Auto-UAT approved → done.",
+                                    "msg_type": "info", "timestamp": now.isoformat(),
+                                })
+                                add_activity("system", task.get("assigned_to", "?"), "auto_uat",
+                                             f"Task #{tid} auto-UAT approved (QA timeout)")
+                                from hub.routers.tasks import _auto_notify_dependents
+                                _auto_notify_dependents(tid)
+                            else:
+                                task["status"] = "uat"
+                                task["_uat_entered_at"] = now.isoformat()
+                                messages.setdefault("user", []).append({
+                                    "sender": "system", "receiver": "user",
+                                    "content": f"Task #{tid} QA testing timed out (20 min). Moved to UAT for manual review.",
+                                    "msg_type": "info", "timestamp": now.isoformat(),
+                                })
+                                add_activity("system", task.get("assigned_to", "?"), "testing_timeout",
+                                             f"QA testing #{tid} timed out (20 min) → UAT")
                             bump_version()
                     except (ValueError, TypeError):
                         pass
+                elif task.get("status") == "uat":
+                    uat_timeout = _cfg.get("auto_uat_timeout", 0)
+                    if uat_timeout > 0:
+                        entered = task.get("_uat_entered_at", "")
+                        if not entered:
+                            task["_uat_entered_at"] = now.isoformat()
+                            continue
+                        try:
+                            entered_time = datetime.fromisoformat(entered)
+                            if (now - entered_time).total_seconds() > uat_timeout:
+                                task["status"] = "done"
+                                task["completed_at"] = now.isoformat()
+                                task.pop("_uat_entered_at", None)
+                                analytics_log.append({
+                                    "task_id": tid, "agent": task.get("assigned_to", ""),
+                                    "status": "done", "started": task.get("started_at", ""),
+                                    "completed": task["completed_at"],
+                                })
+                                messages.setdefault("user", []).append({
+                                    "sender": "system", "receiver": "user",
+                                    "content": f"Task #{tid} auto-approved (UAT timeout: {uat_timeout}s).",
+                                    "msg_type": "info", "timestamp": now.isoformat(),
+                                })
+                                add_activity("system", task.get("assigned_to", "?"), "uat_auto_approved",
+                                             f"UAT #{tid} auto-approved (timeout {uat_timeout}s)")
+                                from hub.routers.tasks import _auto_notify_dependents
+                                _auto_notify_dependents(tid)
+                                bump_version()
+                        except (ValueError, TypeError):
+                            pass
                 # Legacy peer review timeout
                 elif task.get("review_status") == "pending_review":
                     completed_at = task.get("completed_at", "")

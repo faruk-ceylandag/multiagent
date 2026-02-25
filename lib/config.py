@@ -50,6 +50,11 @@ def load_config(workspace: str) -> dict:
         "budget_per_agent": 0,
         "notifications_webhook": {},
         "auto_scale": {"enabled": False, "min_agents": 2, "max_agents": 8, "queue_threshold": 3},
+        "auto_uat": False,              # True → skip UAT, go directly to done
+        "auto_uat_timeout": 0,          # >0 → N seconds, auto-approve UAT after timeout (0 = manual)
+        "auto_plan_approval": False,    # True → auto-approve all plans
+        "auto_plan_single_step": True,  # True → auto-approve single-step plans
+        "escalation_threshold": 3,      # N failures → escalate to architect
     }
     for name in ["multiagent.json", ".multiagent/config.json"]:
         path = os.path.join(workspace, name)

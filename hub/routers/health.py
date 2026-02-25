@@ -8,7 +8,7 @@ from fastapi import APIRouter
 from hub.state import (
     lock, logger, ALL_AGENTS, WORKSPACE, _cfg, agents, pipeline,
     tasks, messages, changes, analytics_log, log_buffers, activity,
-    rate_limited_agents, sse_clients, crash_log, usage_log,
+    rate_limited_agents, sse_clients, crash_log, usage_log, bump_version,
 )
 
 router = APIRouter(tags=["health"])
@@ -132,6 +132,37 @@ def health_detailed():
 @router.get("/config")
 def get_config():
     return {"agents": ALL_AGENTS, "workspace": WORKSPACE, **_cfg}
+
+@router.put("/config")
+def update_config(data: dict):
+    """Update runtime config values."""
+    import os
+    import hub.state as _st
+    allowed_keys = {"auto_uat", "auto_uat_timeout", "auto_plan_approval",
+                    "auto_plan_single_step", "escalation_threshold",
+                    "budget_limit", "budget_per_agent", "notifications"}
+    updated = {}
+    with lock:
+        for key, value in data.items():
+            if key in allowed_keys:
+                _st._cfg[key] = value
+                updated[key] = value
+        if updated:
+            bump_version()
+            # Persist to multiagent.json
+            cfg_path = os.path.join(WORKSPACE, "multiagent.json") if WORKSPACE else ""
+            if cfg_path:
+                try:
+                    existing = {}
+                    if os.path.exists(cfg_path):
+                        with open(cfg_path) as f:
+                            existing = json.load(f)
+                    existing.update(updated)
+                    with open(cfg_path, "w") as f:
+                        json.dump(existing, f, indent=2)
+                except Exception as e:
+                    logger.warning(f"Config write error: {e}")
+    return {"status": "ok", "updated": updated}
 
 @router.post("/health/crash")
 def report_crash(data: dict):
