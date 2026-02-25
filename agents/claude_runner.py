@@ -284,6 +284,8 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
                                             log(ctx, f"  💬 {tline[:300]}")
                                             out_lines += 1
                                             ctx._last_output_lines.append(tline[:500])
+                                            if len(ctx._last_output_lines) > 200:
+                                                ctx._last_output_lines = ctx._last_output_lines[-100:]
 
                             elif btype == "tool_use":
                                 tool_name = b.get("name", "?")
@@ -343,7 +345,18 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
                             stderr_lines.append(line)
 
             ctx.current_proc = None
-            code = proc.wait(timeout=60)
+            try:
+                code = proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                log(ctx, "⚠ Claude process hung after stdout closed, killing")
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    code = proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    code = -9
             t.join(timeout=5)
             log(ctx, f"◼ exit={code}, {out_lines} lines, {tool_count} tools")
 
@@ -424,6 +437,12 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
                 time.sleep(3)
         finally:
             ctx.current_proc = None
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
 
     # Only save session if we have a valid one from the result event
     # Don't generate random UUIDs — let Claude CLI manage session creation

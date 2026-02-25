@@ -45,6 +45,11 @@ def store_cache(data: dict):
     content_type = data.get("content_type", "text")
     description = data.get("description", "")
 
+    # Path containment check
+    _test_path = os.path.join(CACHE_DIR, safe_key + ".test")
+    if not os.path.realpath(_test_path).startswith(os.path.realpath(CACHE_DIR)):
+        return {"status": "error", "message": "invalid cache key (path traversal)"}
+
     # Determine file extension
     if content_type == "base64":
         # Try to detect image type from content or use .bin

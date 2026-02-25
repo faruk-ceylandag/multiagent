@@ -204,6 +204,7 @@ def update_task(tid: int, data: dict):
                     })
                 else:
                     tasks[tid]["status"] = "in_testing"
+                    tasks[tid]["_testing_started_at"] = datetime.now().isoformat()
                     _dispatch_qa(tid)
                 add_activity("system", tasks[tid].get("assigned_to", "?"), "review_skipped",
                              f"Code review #{tid} skipped (skip_review flag)")
@@ -313,6 +314,7 @@ def _dispatch_code_review(tid):
     if not reviewers:
         # No reviewer agents available → auto-approve and skip to testing
         task["status"] = "in_testing"
+        task["_testing_started_at"] = datetime.now().isoformat()
         add_activity("system", task.get("assigned_to", "?"), "review_auto_approved",
                      f"Code review #{tid} auto-approved (no reviewer agents)")
         _dispatch_qa(tid)
@@ -324,6 +326,7 @@ def _dispatch_code_review(tid):
     if rework_count >= MAX_REWORK_LOOPS:
         # Auto-approve after max rework cycles
         task["status"] = "in_testing"
+        task["_testing_started_at"] = datetime.now().isoformat()
         task_reviews[tid_str] = {r: {"verdict": "approve", "comments": [],
                                       "timestamp": datetime.now().isoformat(), "auto": True}
                                   for r in reviewers}
@@ -849,6 +852,8 @@ def add_comment(tid: int, data: dict):
     text = data.get("text", "").strip()
     if not text:
         return {"status": "error", "message": "text required"}
+    if len(task_comments.get(tid_str, [])) >= 100:
+        return {"status": "error", "message": "comment limit reached (100 per task)"}
     with lock:
         _st._comment_counter += 1
         cid = _st._comment_counter
@@ -939,6 +944,7 @@ def submit_review(tid: int, data: dict):
             if all_approved:
                 # 3/3 approved → advance to in_testing
                 tasks[tid]["status"] = "in_testing"
+                tasks[tid]["_testing_started_at"] = datetime.now().isoformat()
                 tasks[tid].pop("review_dispatched_at", None)
                 add_activity("system", tasks[tid].get("assigned_to", "?"), "review_approved",
                              f"Code review #{tid} passed (3/3 approved)")

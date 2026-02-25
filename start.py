@@ -527,7 +527,14 @@ while True:
             name = agent["name"] if isinstance(agent, dict) else agent
             w = workers.get(name)
             if not w: continue
-            if w["proc"].poll() is not None:
+            if w["proc"].poll() is None:
+                # Worker still running — reset crash counter if stable for 5 min
+                last_crash = w.get("last_crash", 0)
+                if last_crash and time.time() - last_crash > 300:
+                    w["restarts"] = 0
+                    w["last_crash"] = 0
+                continue
+            if True:  # Worker exited
                 rc = w["proc"].returncode
                 restarts = w.get("restarts", 0)
                 if restarts >= MAX_RESTARTS:
@@ -551,10 +558,13 @@ while True:
                                                  headers={"Content-Type": "application/json"})
                     urllib.request.urlopen(req, timeout=3)
                 except Exception: pass
-                time.sleep(BOOT_STAGGER)
+                backoff = min(60, BOOT_STAGGER * (2 ** min(restarts, 5)))
+                warn(f"{name} restarting in {backoff}s (attempt #{restarts+1})")
+                time.sleep(backoff)
                 try: w["log_fh"].close()
                 except OSError: pass
                 pid = launch_worker(agent)
                 workers[name]["restarts"] = restarts + 1
+                workers[name]["last_crash"] = time.time()
                 log(f"{name} restarted (PID {pid})")
     except KeyboardInterrupt: cleanup()

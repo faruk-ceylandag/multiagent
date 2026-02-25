@@ -392,6 +392,7 @@ _setup_stop_signal(ctx)
 # ════════════════════════════════════════
 #  MAIN LOOP
 # ════════════════════════════════════════
+_consecutive_failures = 0
 while True:
     try:
         # Adaptive polling: backoff when idle, reset on activity
@@ -406,11 +407,9 @@ while True:
         poll_resp = hub_post(ctx, f"/poll/{ctx.AGENT_NAME}", {}, timeout=5)
         if not poll_resp:
             if is_degraded():
-                log(ctx, "⛔ Hub unreachable — shutting down")
-                set_status(ctx, "offline", "hub_down")
-                unlock_all(ctx)
-                flush_logs(ctx)
-                sys.exit(1)
+                log(ctx, "⚠ Hub unreachable, waiting 30s before retry")
+                time.sleep(30)
+                continue
             continue
 
         if poll_resp.get("stop"):
@@ -438,10 +437,15 @@ while True:
         if ctx.idle_count % 30 == 0:
             try:
                 if os.path.exists(ctx.LOG_FILE) and os.path.getsize(ctx.LOG_FILE) > ctx.MAX_LOG:
-                    bak = ctx.LOG_FILE + ".1"
-                    if os.path.exists(bak):
-                        os.remove(bak)
-                    os.rename(ctx.LOG_FILE, bak)
+                    for i in range(3, 1, -1):
+                        src = f"{ctx.LOG_FILE}.{i-1}"
+                        dst = f"{ctx.LOG_FILE}.{i}"
+                        if os.path.exists(src):
+                            try:
+                                os.replace(src, dst)
+                            except OSError:
+                                pass
+                    os.rename(ctx.LOG_FILE, f"{ctx.LOG_FILE}.1")
             except OSError:
                 pass
 
@@ -1438,6 +1442,17 @@ RULES:
                 "tokens_used": ctx.session_tokens,
                 "claude_calls": ctx.claude_calls,
             })
+
+        # Track consecutive failures for backoff
+        if is_task:
+            if task_ok:
+                _consecutive_failures = 0
+            else:
+                _consecutive_failures += 1
+                if _consecutive_failures >= 3:
+                    _fail_backoff = min(120, 10 * 2 ** (_consecutive_failures - 3))
+                    log(ctx, f"⚠ {_consecutive_failures} consecutive failures — backing off {_fail_backoff}s")
+                    time.sleep(_fail_backoff)
 
         # Send final progress with correct token count before going idle
         report_progress(ctx, "task_done", f"{ctx.session_tokens:,} tok, {ctx.claude_calls} calls")

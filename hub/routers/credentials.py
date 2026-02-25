@@ -61,7 +61,7 @@ def save_credentials(data: dict):
                     messages[agent] = []
                 messages[agent].append({
                     "sender": "system", "receiver": agent, "content": "Credentials updated",
-                    "msg_type": "credential", "credentials": data,
+                    "msg_type": "credential", "credentials": {k: "***" for k in data.keys()},
                     "time": datetime.now().isoformat()
                 })
         add_activity("user", "system", "credentials", f"Updated: {', '.join(data.keys())}")

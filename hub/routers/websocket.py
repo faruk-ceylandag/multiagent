@@ -2,22 +2,42 @@
 
 import asyncio
 import json
+import threading
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from hub.state import (
     log_buffers, log_counters, get_version, get_dashboard_snapshot,
 )
+from hub.middleware.auth import _load_token
 
 router = APIRouter(tags=["websocket"])
 
+MAX_WS_CLIENTS = 50
 _ws_clients: set = set()
+_ws_lock = threading.Lock()
 
 
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    # Auth check — reject before accepting if token mismatch
+    hub_token = _load_token()
+    if hub_token:
+        client_token = ws.query_params.get("token", "")
+        if client_token != hub_token:
+            await ws.close(code=4001)
+            return
+
+    # Max connections guard
+    with _ws_lock:
+        if len(_ws_clients) >= MAX_WS_CLIENTS:
+            await ws.accept()
+            await ws.close(code=4002)
+            return
+
     await ws.accept()
-    _ws_clients.add(ws)
+    with _ws_lock:
+        _ws_clients.add(ws)
     last_version = -1
     follow_agent = ""
     log_cursors = {}
@@ -67,6 +87,7 @@ async def websocket_endpoint(ws: WebSocket):
                         cmd = json.loads(msg)
                         if cmd.get("type") == "follow":
                             follow_agent = cmd.get("agent", "")
+                            log_cursors.clear()
                             if follow_agent:
                                 log_cursors[follow_agent] = log_counters.get(follow_agent, 0)
                     except (json.JSONDecodeError, AttributeError):
@@ -81,10 +102,13 @@ async def websocket_endpoint(ws: WebSocket):
     except Exception:
         pass
     finally:
-        _ws_clients.discard(ws)
+        with _ws_lock:
+            _ws_clients.discard(ws)
 
 
 @router.get("/ws/clients")
 def ws_client_count():
     """How many WebSocket clients are connected."""
-    return {"count": len(_ws_clients)}
+    with _ws_lock:
+        count = len(_ws_clients)
+    return {"count": count}

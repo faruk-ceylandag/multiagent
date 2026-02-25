@@ -6,6 +6,7 @@ from urllib.request import Request, urlopen
 _hub_failures = 0
 _hub_last_ok = 0
 _HUB_MAX_FAILURES = 10  # After this many consecutive failures, log warning
+_hub_last_recovery_attempt = 0
 
 
 def _get_auth_headers():
@@ -36,7 +37,7 @@ def _get_cached_auth():
 
 
 def hub_post(ctx, path, data, retries=1, timeout=5):
-    global _hub_failures, _hub_last_ok
+    global _hub_failures, _hub_last_ok, _hub_last_recovery_attempt
     for attempt in range(retries + 1):
         try:
             body = json.dumps(data).encode()
@@ -56,14 +57,27 @@ def hub_post(ctx, path, data, retries=1, timeout=5):
                     from .log_utils import log
                     log(ctx, f"⚠ Hub unreachable ({_hub_failures} failures), entering degraded mode")
                 if _hub_failures >= _HUB_MAX_FAILURES:
-                    # Exponential backoff reconnect
+                    now = time.time()
+                    # Try recovery every 30s instead of full exponential backoff
+                    if now - _hub_last_recovery_attempt > 30:
+                        _hub_last_recovery_attempt = now
+                        try:
+                            req = Request(f"{ctx.HUB_URL}/health", headers=headers)
+                            urlopen(req, timeout=3)
+                            _hub_failures = 0
+                            _hub_last_ok = now
+                            from .log_utils import log
+                            log(ctx, "✓ Hub recovered from degraded mode")
+                            return None  # Caller will retry
+                        except Exception:
+                            pass
                     backoff = min(60, 5 * (2 ** min(_hub_failures - _HUB_MAX_FAILURES, 4)))
                     time.sleep(backoff)
                 return None
 
 
 def hub_get(ctx, path, retries=1):
-    global _hub_failures, _hub_last_ok
+    global _hub_failures, _hub_last_ok, _hub_last_recovery_attempt
     for attempt in range(retries + 1):
         try:
             req = Request(f"{ctx.HUB_URL}{path}", headers=_get_cached_auth())
@@ -77,6 +91,21 @@ def hub_get(ctx, path, retries=1):
                 time.sleep(1)
             else:
                 if _hub_failures >= _HUB_MAX_FAILURES:
+                    now = time.time()
+                    # Try recovery every 30s instead of full exponential backoff
+                    if now - _hub_last_recovery_attempt > 30:
+                        _hub_last_recovery_attempt = now
+                        try:
+                            headers = _get_cached_auth()
+                            req = Request(f"{ctx.HUB_URL}/health", headers=headers)
+                            urlopen(req, timeout=3)
+                            _hub_failures = 0
+                            _hub_last_ok = now
+                            from .log_utils import log
+                            log(ctx, "✓ Hub recovered from degraded mode")
+                            return None  # Caller will retry
+                        except Exception:
+                            pass
                     backoff = min(60, 5 * (2 ** min(_hub_failures - _HUB_MAX_FAILURES, 4)))
                     time.sleep(backoff)
                 return None

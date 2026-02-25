@@ -432,8 +432,9 @@ def _watch_mcp_files(ctx):
             if need_reload and (now - _last_reload) > 10:
                 reload_mcp(ctx)
                 _last_reload = now
-        except Exception:
-            pass
+        except Exception as e:
+            log(ctx, f"\u26a0 MCP watcher: {e}")
+            time.sleep(30)
 
 
 def _mcp_fingerprint(srv):

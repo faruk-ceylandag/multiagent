@@ -92,7 +92,9 @@ setInterval(() => {
 function connectWebSocket() {
   if (_ws && (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING)) return;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = proto + '//' + location.host + '/ws';
+  // Read hub_token from cookie for WS auth
+  const _hubToken = (document.cookie.match(/(?:^|;\s*)hub_token=([^;]*)/) || [])[1] || '';
+  const wsUrl = proto + '//' + location.host + '/ws' + (_hubToken ? '?token=' + encodeURIComponent(_hubToken) : '');
   try {
     _ws = new WebSocket(wsUrl);
   } catch(e) {

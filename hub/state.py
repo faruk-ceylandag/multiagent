@@ -47,6 +47,10 @@ for _rn in _REQUIRED_REVIEWERS:
 VISIBLE_AGENTS[:] = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
 
 MAX_TASKS = 500
+MAX_COMMENTS_PER_TASK = 100
+MAX_PENDING_PLANS = 200
+MAX_CACHE_ENTRIES = 500
+MAX_LEARNINGS = 500
 BUDGET_LIMIT = float(_cfg.get("budget_limit", 0))
 BUDGET_PER_AGENT = float(_cfg.get("budget_per_agent", 0))
 
@@ -368,12 +372,15 @@ def _append_log_disk(name, lines):
                 f.write(str(line) + "\n")
         try:
             if os.path.getsize(lf) > 2_000_000:
-                bak = lf + ".1"
-                try:
-                    os.remove(bak)
-                except OSError:
-                    pass
-                os.rename(lf, bak)
+                for i in range(3, 1, -1):
+                    src = f"{lf}.{i-1}"
+                    dst = f"{lf}.{i}"
+                    if os.path.exists(src):
+                        try:
+                            os.replace(src, dst)
+                        except OSError:
+                            pass
+                os.rename(lf, f"{lf}.1")
         except OSError:
             pass
     except Exception as e:
@@ -440,6 +447,33 @@ def _do_save():
                 tasks.clear()
                 tasks.update(active)
                 task_snapshot = dict(tasks)
+        # Bounded data structure cleanup
+        # Clean comments/reviews for completed tasks
+        active_tids = {str(k) for k, v in task_snapshot.items() if v.get("status") not in ("done", "failed", "cancelled")}
+        for tid_str in list(task_comments.keys()):
+            if tid_str not in active_tids:
+                del task_comments[tid_str]
+        for tid_str in list(task_reviews.keys()):
+            if tid_str not in active_tids:
+                del task_reviews[tid_str]
+        # Cap pending_plans
+        if len(pending_plans) > MAX_PENDING_PLANS:
+            non_pending = [pid for pid, p in pending_plans.items() if p.get("status") != "pending"]
+            for pid in sorted(non_pending)[:len(pending_plans) - MAX_PENDING_PLANS]:
+                del pending_plans[pid]
+        # Cap cache_registry (LRU by created timestamp)
+        if len(cache_registry) > MAX_CACHE_ENTRIES:
+            sorted_keys = sorted(cache_registry.keys(), key=lambda k: cache_registry[k].get("created", ""))
+            for k in sorted_keys[:len(cache_registry) - MAX_CACHE_ENTRIES]:
+                entry = cache_registry.pop(k, None)
+                if entry and entry.get("path"):
+                    try:
+                        os.remove(entry["path"])
+                    except OSError:
+                        pass
+        # Cap learnings
+        if len(agent_learnings) > MAX_LEARNINGS:
+            del agent_learnings[:len(agent_learnings) - MAX_LEARNINGS]
         # Build snapshot without lock — GIL ensures atomic dict/list reads
         snapshot = {
             "tasks": task_snapshot, "usage_log": dict(usage_log), "sessions": dict(sessions),
@@ -464,9 +498,20 @@ def _do_save():
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w") as f:
             json.dump(snapshot, f, default=str)
-        os.replace(tmp, STATE_FILE)  # atomic on POSIX
-        # Rotate backups: keep last 3
+        # Validate tmp before replacing
+        try:
+            with open(tmp) as f:
+                json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error(f"Corrupt tmp state file, skipping save: {e}")
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return
+        # Rotate backups BEFORE replace (preserve last known good state)
         _rotate_backups()
+        os.replace(tmp, STATE_FILE)  # atomic on POSIX
     except Exception as e:
         logger.warning(f"save: {e}")
 
@@ -798,35 +843,43 @@ def _build_dashboard_data():
     """Build full dashboard data dict. Called without lock — safe for display.
     Quick dict() copies prevent RuntimeError from concurrent dict modifications."""
     now = datetime.now()
-    # Quick copies to avoid RuntimeError during dict iteration
-    # Filter hidden agents from dashboard display
-    visible_names = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
-    hidden_names = [a for a in ALL_AGENTS if a in HIDDEN_AGENTS]
+    # Snapshot all mutable dicts to prevent RuntimeError from concurrent modification
+    all_agents_snap = list(ALL_AGENTS)
+    hidden_snap = set(HIDDEN_AGENTS)
+    visible_names = [a for a in all_agents_snap if a not in hidden_snap]
+    hidden_names = [a for a in all_agents_snap if a in hidden_snap]
     agent_names = visible_names + hidden_names
+    agents_snap = dict(agents)
+    sessions_snap = dict(sessions)
+    pipeline_snap = dict(pipeline)
+    progress_snap = dict(agent_progress)
+    spec_snap = dict(agent_specialization)
+    rl_snap = dict(rate_limited_agents)
     msgs_snap = dict(messages)
     usage_snap = dict(usage_log)
     locks_snap = dict(file_locks)
     changes_snap = list(changes)
-    tasks_snap = [t for t in tasks.values() if not t.get("_is_review_subtask")]
+    tasks_snap_dict = dict(tasks)
+    tasks_snap = [t for t in tasks_snap_dict.values() if not t.get("_is_review_subtask")]
 
     ai = {}
     for n in agent_names:
-        a = agents.get(n, {})
+        a = agents_snap.get(n, {})
         try:
             last = datetime.fromisoformat(a.get("last_seen", "2000-01-01"))
             silent = int((now - last).total_seconds())
         except (ValueError, TypeError):
             silent = 999
-        ss = sessions.get(n, {})
-        p = pipeline.get(n, {"status": "offline", "detail": ""})
+        ss = sessions_snap.get(n, {})
+        p = pipeline_snap.get(n, {"status": "offline", "detail": ""})
         try:
             age = int((now - datetime.fromisoformat(ss["started_at"])).total_seconds() / 60) if ss.get("started_at") else 0
         except (ValueError, TypeError):
             age = 0
-        rl_until = rate_limited_agents.get(n, 0)
+        rl_until = rl_snap.get(n, 0)
         is_rl = rl_until > time.time()
-        prog = agent_progress.get(n, {})
-        spec = agent_specialization.get(n, {})
+        prog = progress_snap.get(n, {})
+        spec = spec_snap.get(n, {})
         ai[n] = {
             "status": "rate_limited" if is_rl else ("unresponsive" if silent > 180 else a.get("status", "offline")),
             "pipeline": p.get("status", "offline"), "detail": p.get("detail", ""),
@@ -836,16 +889,16 @@ def _build_dashboard_data():
             "progress": prog, "expertise": spec.get("score", 0),
             "cost": calc_agent_cost(n),
         }
-        if n in HIDDEN_AGENTS:
+        if n in hidden_snap:
             ai[n]["hidden"] = True
     # Analytics summary (real-time, no HTTP fetch needed)
-    all_names = sorted((set(agent_names) | set(usage_snap.keys())) - HIDDEN_AGENTS)
+    all_names = sorted((set(agent_names) | set(usage_snap.keys())) - hidden_snap)
     by_agent = {}
     for a_name in all_names:
         u = usage_snap.get(a_name, {})
         td = len([t for t in tasks_snap if t.get("assigned_to") == a_name and t.get("status") == "done"])
         tf = len([t for t in tasks_snap if t.get("assigned_to") == a_name and t.get("status") == "failed"])
-        spec = agent_specialization.get(a_name, {})
+        spec = spec_snap.get(a_name, {})
         by_agent[a_name] = {
             "tokens_in": u.get("tokens_in", 0), "tokens_out": u.get("tokens_out", 0),
             "requests": u.get("requests", 0), "tasks_done": td, "tasks_failed": tf,
@@ -895,7 +948,7 @@ def _build_dashboard_data():
         "task_reviews": dict(task_reviews),
         "analytics": {
             "by_agent": by_agent, "durations": durations,
-            "total_tasks": len(tasks),
+            "total_tasks": len(tasks_snap_dict),
             "tasks_done": len([t for t in tasks_snap if t.get("status") == "done"]),
             "tasks_pending": len([t for t in tasks_snap if t.get("status") in ("to_do", "in_progress", "code_review", "in_testing", "uat", "created", "assigned")]),
             "budget": {"total_spent": total_cost, "limit": BUDGET_LIMIT,
@@ -940,6 +993,7 @@ def _review_timeout_timer():
                                 # Check if now all approved → advance to in_testing
                                 if all(reviews.get(r, {}).get("verdict") == "approve" for r in reviewers):
                                     task["status"] = "in_testing"
+                                    task["_testing_started_at"] = now.isoformat()
                                     task.pop("review_dispatched_at", None)
                                     # Mark remaining review subtasks as done (auto-approved)
                                     for sub_id in task.get("_review_subtask_ids", []):
@@ -955,6 +1009,26 @@ def _review_timeout_timer():
                                 bump_version()
                         except (ValueError, TypeError):
                             pass
+                elif task.get("status") == "in_testing":
+                    started = task.get("_testing_started_at", "")
+                    if not started:
+                        task["_testing_started_at"] = now.isoformat()
+                        continue
+                    try:
+                        started_time = datetime.fromisoformat(started)
+                        if (now - started_time).total_seconds() > 1200:  # 20 min
+                            task["status"] = "uat"
+                            task.pop("_testing_started_at", None)
+                            messages.setdefault("user", []).append({
+                                "sender": "system", "receiver": "user",
+                                "content": f"Task #{tid} QA testing timed out (20 min). Moved to UAT for manual review.",
+                                "msg_type": "info", "timestamp": now.isoformat(),
+                            })
+                            add_activity("system", task.get("assigned_to", "?"), "testing_timeout",
+                                         f"QA testing #{tid} timed out (20 min) → UAT")
+                            bump_version()
+                    except (ValueError, TypeError):
+                        pass
                 # Legacy peer review timeout
                 elif task.get("review_status") == "pending_review":
                     completed_at = task.get("completed_at", "")
