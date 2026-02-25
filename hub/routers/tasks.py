@@ -76,6 +76,8 @@ def create_task(data: dict):
             "created_by": data.get("created_by", "user"),
             "review_status": "",  # pending_review, approved, needs_changes, auto_approved
             "reviewer": "",
+            "skip_review": bool(data.get("skip_review", False)),
+            "skip_qa": bool(data.get("skip_qa", False)),
         }
         creator = task["created_by"]
         # Inherit project/branch/external_id from parent task if not specified
@@ -141,6 +143,15 @@ def update_task(tid: int, data: dict):
         new_status = tasks[tid].get("status", "")
         if new_status == "in_progress" and not tasks[tid].get("started_at"):
             tasks[tid]["started_at"] = datetime.now().isoformat()
+        if new_status == "in_progress" and not tasks[tid].get("_base_commit"):
+            project = tasks[tid].get("project", "")
+            if project:
+                from hub.state import git_cmd, safe_project_dir
+                proj_dir = safe_project_dir(project)
+                if proj_dir:
+                    _, head = git_cmd(["rev-parse", "HEAD"], cwd=proj_dir)
+                    if head:
+                        tasks[tid]["_base_commit"] = head.strip()
         if new_status in ("done", "failed", "cancelled") and not tasks[tid].get("completed_at"):
             tasks[tid]["completed_at"] = datetime.now().isoformat()
             analytics_log.append({
@@ -181,7 +192,24 @@ def update_task(tid: int, data: dict):
 
         # ── Auto-notification: only on actual status transitions ──
         if new_status == "code_review" and old_status != "code_review":
-            _dispatch_code_review(tid)
+            if tasks[tid].get("skip_review"):
+                # Skip code review → go to in_testing (or uat if skip_qa too)
+                if tasks[tid].get("skip_qa"):
+                    tasks[tid]["status"] = "uat"
+                    ts = datetime.now().isoformat()
+                    messages.setdefault("user", []).append({
+                        "sender": "system", "receiver": "user",
+                        "content": f"Task #{tid} skipped review+QA → moved to UAT.",
+                        "msg_type": "info", "timestamp": ts,
+                    })
+                else:
+                    tasks[tid]["status"] = "in_testing"
+                    _dispatch_qa(tid)
+                add_activity("system", tasks[tid].get("assigned_to", "?"), "review_skipped",
+                             f"Code review #{tid} skipped (skip_review flag)")
+                bump_version()
+            else:
+                _dispatch_code_review(tid)
         elif new_status == "done" and old_status != "done":
             _auto_notify_dependents(tid)
             _check_plan_parent_completion(tid)
@@ -329,7 +357,7 @@ def _dispatch_code_review(tid):
         from hub.state import git_cmd, safe_project_dir
         proj_dir = safe_project_dir(project)
         if proj_dir:
-            base = "main"
+            base = task.get("_base_commit") or "main"
             _, raw_diff = git_cmd(["diff", f"{base}...{branch}", "--stat"], cwd=proj_dir)
             _, detailed = git_cmd(["diff", f"{base}...{branch}"], cwd=proj_dir)
             if detailed:
@@ -422,12 +450,29 @@ def _dispatch_qa(tid):
     branch = task.get("branch", "")
     ts = datetime.now().isoformat()
 
+    # Determine changed files scope
+    changed_files_hint = ""
+    if project:
+        from hub.state import git_cmd, safe_project_dir
+        proj_dir = safe_project_dir(project)
+        if proj_dir:
+            base = task.get("_base_commit") or "main"
+            if branch:
+                _, files_raw = git_cmd(["diff", f"{base}...{branch}", "--name-only"], cwd=proj_dir)
+            else:
+                _, files_raw = git_cmd(["diff", "--name-only", base], cwd=proj_dir)
+            if files_raw:
+                file_list = [f.strip() for f in files_raw.strip().split("\n") if f.strip()][:30]
+                if file_list:
+                    changed_files_hint = f"\n\nChanged files (scope your testing to these):\n" + "\n".join(f"  - {f}" for f in file_list)
+
     qa_msg = (
         f"QA TEST REQUEST — Task #{tid}\n"
         f"Code review passed (3/3 approved). Now verify with tests.\n"
         f"Author: {task.get('assigned_to', '?')} | Project: {project} | Branch: {branch}\n\n"
-        f"Task: {desc}\n\n"
-        f"Run ALL test suites, linters, and verify the changes work correctly.\n"
+        f"Task: {desc}{changed_files_hint}\n\n"
+        f"Scope your testing to the changed files listed above.\n"
+        f"Run relevant test suites, linters, and verify the changes work correctly.\n"
         f"If tests pass, report SUCCESS. If tests fail, report FAILURE with details."
     )
     messages.setdefault(qa_agent, []).append({
@@ -904,7 +949,18 @@ def submit_review(tid: int, data: dict):
                     "content": f"✅ Task #{tid} code review passed (3/3 approved). Moving to QA testing.",
                     "msg_type": "info", "timestamp": ts,
                 })
-                _dispatch_qa(tid)
+                if tasks[tid].get("skip_qa"):
+                    tasks[tid]["status"] = "uat"
+                    add_activity("system", tasks[tid].get("assigned_to", "?"), "qa_skipped",
+                                 f"QA #{tid} skipped (skip_qa flag)")
+                    ts_qa = datetime.now().isoformat()
+                    messages.setdefault("user", []).append({
+                        "sender": "system", "receiver": "user",
+                        "content": f"✅ Task #{tid} code review passed. QA skipped → moved to UAT.",
+                        "msg_type": "info", "timestamp": ts_qa,
+                    })
+                else:
+                    _dispatch_qa(tid)
             else:
                 # At least one request_changes → send back to dev
                 tasks[tid]["status"] = "in_progress"

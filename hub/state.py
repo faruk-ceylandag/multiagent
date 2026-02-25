@@ -82,6 +82,7 @@ changes: List[dict] = []
 change_counter = 0
 activity: deque = deque(maxlen=500)
 stop_signals: Dict[str, bool] = {}
+agent_pids = {}  # agent_name → PID
 analytics_log: List[dict] = []
 MAX_ANALYTICS = 1000
 rate_limited_agents: Dict[str, float] = {}

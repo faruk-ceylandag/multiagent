@@ -1,13 +1,13 @@
 """Agent management routes: register, add, remove, edit, status, progress, specialization, learning."""
 
-import os, json, re, time, subprocess, threading
+import os, json, re, time, subprocess, threading, signal
 from datetime import datetime
 from collections import OrderedDict
 from fastapi import APIRouter
 
 from hub.state import (
     lock, logger, MA_DIR, WORKSPACE, ALL_AGENTS, agents, pipeline, log_buffers, log_counters,
-    stop_signals, rate_limited_agents, agent_progress, agent_specialization,
+    stop_signals, agent_pids, rate_limited_agents, agent_progress, agent_specialization,
     agent_learnings, agent_roles, messages, tasks, AgentStatus, add_activity, save_state,
     ROUTE_MAP, MULTI_SCOPE_KEYWORDS, bump_version,
 )
@@ -235,6 +235,9 @@ def register(data: dict):
                     }}),
                     "msg_type": "ecosystem_update",
                 })
+        pid = data.get("pid")
+        if pid:
+            agent_pids[name] = int(pid)
         from hub.state import add_audit
         add_audit(name, "agent_register", {"role": role[:50]})
         bump_version()
@@ -535,6 +538,12 @@ def stop_agent(name: str):
     with lock:
         stop_signals[name] = True
         add_activity("user", name, "stop", f"Stop signal sent to {name}")
+    pid = agent_pids.get(name)
+    if pid:
+        try:
+            os.kill(pid, signal.SIGUSR1)
+        except (OSError, ProcessLookupError):
+            pass
     return {"status": "ok"}
 
 @router.post("/agents/{name}/restart")

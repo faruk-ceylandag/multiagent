@@ -188,7 +188,7 @@ function _applyDashboardData(d) {
   detectTaskChanges(d);
   const taskHash = (d.tasks||[]).map(t=>`${t.id}:${t.status}`).join('|');
   const panelNeedsUpdate = (tab === 'tasks' && taskHash !== _lastTaskHash) ||
-    (tab === 'logs') || (d.version && d.version !== _lastVersion);
+    (d.version && d.version !== _lastVersion && tab !== 'logs');
   _lastTaskHash = taskHash;
   if (d.version) _lastVersion = d.version;
   data = d;
@@ -217,6 +217,7 @@ function _applyDashboardData(d) {
   renderSidebar(names);
   updateBadges();
   if (panelNeedsUpdate) renderPanel();
+  if (tab === 'logs') updateLogHeader();
 }
 
 // ══════════════════════════════════
@@ -554,6 +555,7 @@ function appendLogLines(lines){
       const hdrHtml=colorize(l).replace(/<hr[^>]*>/g,'').replace(/<\/?div[^>]*>/g,'');
       const sm=document.createElement('summary');sm.innerHTML=`${hdrHtml}<span class="call-block-meta">⋯</span>`;
       const body=document.createElement('div');body.className='call-block-body';
+      const loader=document.createElement('div');loader.className='call-block-loading';loader.textContent='Processing...';body.appendChild(loader);
       det.appendChild(sm);det.appendChild(body);el.appendChild(det);
     } else if(_reExitCode.test(l)){
       const open=el.querySelector('details.call-block[open]:last-of-type');
@@ -569,7 +571,7 @@ function appendLogLines(lines){
       } else {const d=document.createElement('div');d.innerHTML=colorize(l);el.appendChild(d);}
     } else {
       const open=el.querySelector('details.call-block[open]:last-of-type');
-      if(open){const body=open.querySelector('.call-block-body');const d=document.createElement('div');d.innerHTML=colorize(l);body.appendChild(d);}
+      if(open){const body=open.querySelector('.call-block-body');const loader=body.querySelector('.call-block-loading');if(loader)loader.remove();const d=document.createElement('div');d.innerHTML=colorize(l);body.appendChild(d);}
       else{const d=document.createElement('div');d.innerHTML=colorize(l);el.appendChild(d);}
     }
   }
@@ -722,6 +724,73 @@ function renderPanel(){
   ({logs:renderLogs,tasks:renderTasks,inbox:renderInbox,review:renderReview,
     analytics:renderAnalytics,activity:renderActivity,locks:renderLocks,
     git:renderGit,tests:renderTests,alerts:renderAlerts})[tab]?.(p);
+}
+function updateLogHeader() {
+  // Update header elements in-place without full re-render (preserves open <details> blocks)
+  if (!sel) return;
+  const agentInfo = (data.agents || {})[sel] || {};
+  const isWorking = agentInfo.pipeline === 'working';
+  const statusDot = isWorking ? 'dot-working' : agentInfo.pipeline === 'idle' ? 'dot-idle' : agentInfo.pipeline === 'booting' ? 'dot-booting' : 'dot-offline';
+  const prog = agentInfo.progress || {};
+  const liveToks = prog.task_tokens || 0;
+  const liveCalls = prog.task_calls || 0;
+  const liveCost = agentInfo.cost || 0;
+  const _rawProject = prog.project || '';
+  const liveProject = _rawProject && _rawProject !== '.' ? _rawProject : '';
+  const serverElapsed = prog.elapsed || 0;
+  const serverTime = prog.time ? new Date(prog.time).getTime() : 0;
+  const liveElapsed = serverTime ? (serverElapsed + Math.floor((Date.now() - serverTime) / 1000)) : serverElapsed;
+  const liveElStr = liveElapsed >= 60 ? Math.floor(liveElapsed / 60) + 'm ' + Math.round(liveElapsed % 60) + 's' : liveElapsed + 's';
+  const hasProgress = isWorking || (serverTime > 0 && liveCalls > 0);
+  const projectTag = liveProject ? ` · 📁 ${esc(liveProject)}` : '';
+
+  // Update status dot
+  const dotEl = document.querySelector('.log-header .agent-dot');
+  if (dotEl) { dotEl.className = 'agent-dot ' + statusDot + ' dot-inline'; }
+
+  // Update progress detail
+  const progDetail = agentInfo.progress?.detail || '';
+  const progEvent = agentInfo.progress?.event || '';
+  const detailEl = document.querySelector('.log-header .text-cyan');
+  if (isWorking && progDetail) {
+    if (detailEl) {
+      detailEl.innerHTML = `${progEvent === 'tool_use' ? '🔧' : '⚡'} ${esc(progDetail.substring(0, 60))}`;
+      detailEl.style.display = '';
+    }
+  } else if (detailEl) {
+    detailEl.style.display = 'none';
+  }
+
+  // Update live stats bar
+  const statsEl = document.querySelector('.log-live-stats');
+  if (hasProgress) {
+    const statsHtml = `⏱ ${liveElStr} · ${formatTokens(liveToks)} tok · ${liveCalls} call${liveCalls !== 1 ? 's' : ''}${projectTag} · ${formatCost(liveCost)}`;
+    if (statsEl) {
+      statsEl.textContent = statsHtml;
+      statsEl.dataset.serverElapsed = serverElapsed;
+      statsEl.dataset.serverTime = serverTime;
+      statsEl.dataset.agent = sel;
+    } else {
+      // Create stats bar if it doesn't exist yet
+      const logHeader = document.querySelector('.log-header');
+      if (logHeader) {
+        const newStats = document.createElement('div');
+        newStats.className = 'log-live-stats';
+        newStats.dataset.agent = sel;
+        newStats.dataset.serverElapsed = serverElapsed;
+        newStats.dataset.serverTime = serverTime;
+        newStats.textContent = statsHtml;
+        logHeader.parentElement.insertBefore(newStats, logHeader.nextSibling);
+      }
+    }
+  } else if (statsEl) {
+    statsEl.remove();
+  }
+
+  // Update line count
+  const totalLines = (logLines[sel] || []).filter(l => l != null && typeof l === 'string').length;
+  const lineCountEl = document.querySelector('.log-header .text-dim');
+  if (lineCountEl) lineCountEl.textContent = totalLines + ' lines';
 }
 function renderLogs(p){
   if(mergedMode){renderMergedLogs(p);return;}
@@ -936,6 +1005,8 @@ function renderTasks(p){
     <select id="newTaskPriority"><option value="1">P1 Critical</option><option value="3">P3 High</option>
       <option value="5" selected>P5 Normal</option><option value="8">P8 Low</option></select>
     <input id="newTaskDeps" placeholder="Deps #" style="width:60px">
+    <label style="font-size:10px;color:var(--fg2);display:flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" id="newTaskSkipReview" style="accent-color:var(--ac)"> Skip review</label>
+    <label style="font-size:10px;color:var(--fg2);display:flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" id="newTaskSkipQa" style="accent-color:var(--ac)"> Skip QA</label>
     <button onclick="createTask()">+ Add</button>
   </div>
   <div class="new-task" style="margin-bottom:8px">
@@ -1026,8 +1097,10 @@ async function createTask(){
   const depsStr=$('newTaskDeps')?.value?.trim();
   if(!desc)return;
   const deps=depsStr?depsStr.split(',').map(d=>parseInt(d.replace('#','').trim())).filter(n=>n>0):[];
+  const skipReview=$('newTaskSkipReview')?.checked||false;
+  const skipQa=$('newTaskSkipQa')?.checked||false;
   await fetch(HUB+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({description:desc,assigned_to:agent,status:'created',depends_on:deps,priority:pri,created_by:'user'})});
+    body:JSON.stringify({description:desc,assigned_to:agent,status:'created',depends_on:deps,priority:pri,created_by:'user',skip_review:skipReview,skip_qa:skipQa})});
   $('newTaskDesc').value='';$('newTaskDeps').value='';
   setTimeout(()=>{poll();renderPanel();},300);
 }
@@ -1907,7 +1980,10 @@ function showHelp(){
   ).join('');
   const shortcuts=[
     [`${_mod}+C`,'Stop selected agent'],
+    [`${_mod}+O`,'Open expanded editor'],
+    [`${_mod}+K`,'Focus command input'],
     [`${_mod}+Enter`,'Send (in expanded editor)'],
+    ['1-9','Select agent by number'],
     ['Esc','Close modal / editor'],
     ['?','Show this help'],
   ];
@@ -2268,9 +2344,24 @@ if(ci){
 
 // ── Global keyboard shortcuts ──
 document.addEventListener('keydown',e=>{
+  const inInput=document.activeElement&&(document.activeElement.tagName==='INPUT'||document.activeElement.tagName==='TEXTAREA'||document.activeElement.tagName==='SELECT');
   // Cmd+C / Ctrl+C (no text selected) → stop selected agent
   if(e.key==='c'&&(e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey){
     const selection=window.getSelection().toString();
     if(!selection&&sel){e.preventDefault();stopAgent(sel);}
   }
+  // Ctrl/Cmd+O → Expanded editor
+  if(e.key==='o'&&(e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey){e.preventDefault();openEditor();}
+  // Ctrl/Cmd+K → Focus command input
+  if(e.key==='k'&&(e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey){e.preventDefault();const ci=$('cmdInput');if(ci)ci.focus();}
+  // Number keys 1-9 → Select agent (only when not in input)
+  if(!inInput&&e.key>='1'&&e.key<='9'&&!e.metaKey&&!e.ctrlKey&&!e.altKey){
+    const names=(data.agent_names||[]).filter(n=>!((data.agents||{})[n]||{}).hidden);
+    const idx=parseInt(e.key)-1;
+    if(idx<names.length){e.preventDefault();selectAgent(names[idx]);}
+  }
+  // ? → Show help (only when not in input)
+  if(!inInput&&e.key==='?'&&!e.metaKey&&!e.ctrlKey&&!e.altKey){e.preventDefault();showHelp();}
+  // Esc → Close modal
+  if(e.key==='Escape'){const modal=document.querySelector('.modal-overlay');if(modal)modal.remove();}
 });

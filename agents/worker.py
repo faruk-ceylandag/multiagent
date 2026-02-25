@@ -34,6 +34,18 @@ from .learning import (read_file, load_skills, run_hook, load_template,
 from .hub_client import get_relevant_patterns, get_peer_learnings
 
 
+def _setup_stop_signal(ctx):
+    """Setup SIGUSR1 handler for instant stop."""
+    def _handle_sigusr1(signum, frame):
+        ctx._should_stop = True
+        if ctx.current_proc:
+            try:
+                ctx.current_proc.terminate()
+            except OSError:
+                pass
+    signal.signal(signal.SIGUSR1, _handle_sigusr1)
+
+
 def _parse_review_verdict(ctx):
     """Parse VERDICT: approve/request_changes from reviewer's output."""
     lines = ctx._last_output_lines[-30:]  # Check last 30 lines
@@ -348,7 +360,7 @@ if _boot_role:
             break
     if not _role_summary:
         _role_summary = _boot_role.split("\n")[0].strip().lstrip("#").strip()[:200]
-hub_post(ctx, "/agents/register", {"agent_name": ctx.AGENT_NAME, "status": "alive", "role": _role_summary})
+hub_post(ctx, "/agents/register", {"agent_name": ctx.AGENT_NAME, "status": "alive", "role": _role_summary, "pid": os.getpid()})
 
 # CLI health check
 try:
@@ -375,6 +387,7 @@ ctx.SESSION_ID = None
 log(ctx, "✓ ONLINE")
 
 set_status(ctx, "idle")
+_setup_stop_signal(ctx)
 
 # ════════════════════════════════════════
 #  MAIN LOOP
@@ -1363,7 +1376,16 @@ RULES:
             else:
                 # Dev agents go to code_review, architect goes to done
                 _SKIP_REVIEW_ROLES = {"architect"}
-                if task_ok and ctx.AGENT_NAME not in _SKIP_REVIEW_ROLES:
+                # Check skip_review flag from task
+                _task_skip_review = False
+                if ctx.current_task_id:
+                    try:
+                        _task_data = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
+                        if _task_data and isinstance(_task_data, dict):
+                            _task_skip_review = _task_data.get("skip_review", False)
+                    except Exception:
+                        pass
+                if task_ok and ctx.AGENT_NAME not in _SKIP_REVIEW_ROLES and not _task_skip_review:
                     _final_status = "code_review"
                     _skip_unlock = True
                 else:

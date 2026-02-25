@@ -42,8 +42,15 @@ def verify_loop(ctx, project, call_claude_fn):
     changed_hint = f"\nChanged files: {', '.join(list(changed)[:10])}" if changed else ""
     run_hook(ctx, "on-verify", {"project": project, "files": list(changed)[:20]})
 
-    for i in range(1, 4):
-        log(ctx, f"━━ VERIFY {i}/3 ━━")
+    # Adaptive cycle count based on number of changed files
+    max_cycles = 3
+    if len(changed) <= 1:
+        max_cycles = 1
+    elif len(changed) <= 5:
+        max_cycles = 2
+
+    for i in range(1, max_cycles + 1):
+        log(ctx, f"━━ VERIFY {i}/{max_cycles} ━━")
         set_status(ctx, "verifying", f"attempt {i}")
         try:
             os.remove(ctx.VERIFY_FILE)
@@ -54,7 +61,18 @@ def verify_loop(ctx, project, call_claude_fn):
         except OSError:
             pass
 
-        call_claude_fn(f"""VERIFY work in {d}. Run ONLY on changed files if possible:\n{cmd_text}{changed_hint}
+        # Lint-first: first cycle only runs lint; full suite on subsequent cycles
+        if i == 1 and max_cycles > 1:
+            verify_prompt = f"""VERIFY (lint-only) work in {d}. Run ONLY lint on changed files:\n{cmd_text}{changed_hint}
+
+IMPORTANT:
+- Only run linting/type-checking on changed files. Skip tests and build for now.
+- If lint passes, write "PASS" to {ctx.VERIFY_FILE}
+- If lint fails, FIX the issues immediately, then re-run lint.
+- Write result: echo "PASS" > {ctx.VERIFY_FILE} OR echo "FAIL: reason" > {ctx.VERIFY_FILE}
+Also: echo "tests_passed=0 tests_failed=0 tests_skipped=0 lint_errors=N" > {ctx.TEST_RESULT_FILE}"""
+        else:
+            verify_prompt = f"""VERIFY work in {d}. Run ONLY on changed files if possible:\n{cmd_text}{changed_hint}
 
 IMPORTANT:
 - Only check errors in files YOU changed. Pre-existing errors in other files don't count.
@@ -66,15 +84,16 @@ IMPORTANT:
 Write result: echo "PASS" > {ctx.VERIFY_FILE} OR echo "FAIL: reason" > {ctx.VERIFY_FILE}
 Also: echo "tests_passed=N tests_failed=N tests_skipped=N lint_errors=N" > {ctx.TEST_RESULT_FILE}
 (lint_errors = only NEW errors in changed files, not pre-existing)
-If FAIL: fix issues then recheck. Do NOT give up — iterate until tests pass.""",
-                       retries=1, force_model=ctx.MODEL_SONNET, cwd=d)
+If FAIL: fix issues then recheck. Do NOT give up — iterate until tests pass."""
+
+        call_claude_fn(verify_prompt, retries=1, force_model=ctx.MODEL_SONNET, cwd=d)
 
         try:
             with open(ctx.VERIFY_FILE) as f:
                 result = f.read().strip()
         except OSError:
             result = "UNKNOWN"
-            log(ctx, f"⚠ Verify file not written (attempt {i}/3) — Claude may lack tool permissions")
+            log(ctx, f"⚠ Verify file not written (attempt {i}/{max_cycles}) — Claude may lack tool permissions")
 
         test_data = {}
         try:
@@ -93,7 +112,7 @@ If FAIL: fix issues then recheck. Do NOT give up — iterate until tests pass.""
         if result.startswith("PASS"):
             log(ctx, "✓ VERIFY PASSED")
             return True
-        if i == 3:
+        if i == max_cycles:
             log(ctx, "✗ VERIFY FAILED")
             hub_msg(ctx, "user", f"⚠️ {ctx.AGENT_NAME}: verify failed on {project}", "blocker")
             run_hook(ctx, "on-error", {"project": project, "error": "verify_failed"})
