@@ -386,13 +386,15 @@ if os.path.exists(_auth_cache):
         if _needs_auth:
             _names = list(_needs_auth.keys())
             log(f"OAuth pending: {', '.join(_names)}")
+            _oauth_env = os.environ.copy()
+            _oauth_env.pop("CLAUDECODE", None)
             for _n in _names:
                 print(f"  {Y}🔐 {_n}: browser will open for OAuth...{NC}", flush=True)
                 try:
                     subprocess.run(
                         ["claude", "-p", f"Call any mcp__{_n} tool. Reply OK.",
                          "--allowedTools", f"mcp__{_n}__*", "--max-turns", "2"],
-                        timeout=120, stdin=None)
+                        timeout=120, stdin=None, env=_oauth_env)
                 except (subprocess.TimeoutExpired, Exception):
                     warn(f"  {_n}: auth not completed")
     except (json.JSONDecodeError, OSError):
@@ -419,6 +421,7 @@ def launch_worker(agent_cfg):
     cmd = [python, "-m", "agents.worker", name, role_file, MA_DIR, HUB_URL, WORKSPACE]
     if model: cmd.append(model)
     worker_env = os.environ.copy()
+    worker_env.pop("CLAUDECODE", None)  # Prevent nested Claude Code session detection
     worker_env["MA_THINKING_MODEL"] = cfg.get("thinking_model", "claude-sonnet-4-5-20250929")
     worker_env["MA_CODING_MODEL"] = cfg.get("coding_model", "claude-opus-4-6")
     worker_env["MA_AUTO_VERIFY"] = "1" if cfg.get("auto_verify", True) else "0"

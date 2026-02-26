@@ -16,6 +16,10 @@ _log = logging.getLogger("hub.messages")
 
 router = APIRouter(tags=["messages"])
 
+# Dedup: recent messages keyed by (content_hash, msg_type, receiver) → {senders, timestamp, entry}
+_recent_msgs = {}  # key → {"senders": set, "ts": float, "entry": dict}
+_DEDUP_WINDOW = 60  # seconds
+
 @router.get("/messages/{name}")
 def get_messages(name: str, peek: bool = False, consume: bool = True):
     # Peek and non-consume are read-only — no lock needed
@@ -101,10 +105,34 @@ def send_message(msg: Message):
                     messages.setdefault("user", []).append(entry)
                     add_activity(msg.sender, msg.receiver, "chat", msg.content[:80])
                     return {"status": "ok", "queued": "chat"}
-            messages.setdefault(msg.receiver, []).append(entry)
-            # Trim receiver queue to prevent unbounded growth
-            if len(messages[msg.receiver]) > 200:
-                messages[msg.receiver] = messages[msg.receiver][-150:]
+
+            # ── Dedup: merge identical messages from multiple agents within window ──
+            import hashlib as _hl, time as _time
+            _now = _time.time()
+            # Prune stale dedup entries
+            stale = [k for k, v in _recent_msgs.items() if _now - v["ts"] > _DEDUP_WINDOW]
+            for k in stale:
+                del _recent_msgs[k]
+
+            _dedup_key = None
+            _is_dup = False
+            # Only dedup agent→user messages (not user→agent, not task/chat)
+            if msg.sender != "user" and msg.receiver == "user" and msg.msg_type not in ("chat", "task", "plan_proposal"):
+                content_hash = _hl.md5(msg.content[:200].encode()).hexdigest()[:12]
+                _dedup_key = (content_hash, msg.msg_type, msg.receiver)
+                if _dedup_key in _recent_msgs:
+                    prev = _recent_msgs[_dedup_key]
+                    prev["senders"].add(msg.sender)
+                    # Update the existing message in the queue to show all senders
+                    prev["entry"]["sender"] = ", ".join(sorted(prev["senders"]))
+                    _is_dup = True
+                else:
+                    _recent_msgs[_dedup_key] = {"senders": {msg.sender}, "ts": _now, "entry": entry}
+
+            if not _is_dup:
+                messages.setdefault(msg.receiver, []).append(entry)
+                if len(messages[msg.receiver]) > 200:
+                    messages[msg.receiver] = messages[msg.receiver][-150:]
             if msg.sender == "user" and msg.receiver != "user":
                 messages.setdefault("user", []).append(entry)
                 if len(messages["user"]) > 200:

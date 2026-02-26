@@ -226,6 +226,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
             cmd.extend(["-p", prompt])
 
             run_env = os.environ.copy()
+            run_env.pop("CLAUDECODE", None)  # Prevent nested session detection
             run_env.update(load_credentials(ctx))
             os.makedirs(effective_cwd, exist_ok=True)
             proc = subprocess.Popen(cmd, cwd=ctx.AGENT_CWD, stdout=subprocess.PIPE,

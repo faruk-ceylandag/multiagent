@@ -35,7 +35,7 @@ from .hub_client import get_relevant_patterns, get_peer_learnings
 
 
 def _fetch_workspaces(ctx):
-    """Fetch registered workspaces from hub."""
+    """Fetch registered workspaces and add_dirs from hub."""
     try:
         resp = hub_get(ctx, "/workspaces")
         if isinstance(resp, list):
@@ -50,6 +50,13 @@ def _fetch_workspaces(ctx):
                         "stacks": ws.get("stacks", {}),
                     }
             ctx._workspace_refresh_at = time.time()
+    except Exception:
+        pass
+    # Sync add_dirs from config → ctx._extra_dirs
+    try:
+        cfg = hub_get(ctx, "/config")
+        if isinstance(cfg, dict):
+            ctx._extra_dirs = [d for d in cfg.get("add_dirs", []) if os.path.isdir(d)]
     except Exception:
         pass
 

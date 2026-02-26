@@ -55,6 +55,7 @@ def load_config(workspace: str) -> dict:
         "auto_plan_approval": False,    # True → auto-approve all plans
         "auto_plan_single_step": True,  # True → auto-approve single-step plans
         "escalation_threshold": 3,      # N failures → escalate to architect
+        "add_dirs": [],                   # Extra directories accessible to all agents via --add-dir
     }
     for name in ["multiagent.json", ".multiagent/config.json"]:
         path = os.path.join(workspace, name)

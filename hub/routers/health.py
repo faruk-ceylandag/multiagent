@@ -140,7 +140,8 @@ def update_config(data: dict):
     import hub.state as _st
     allowed_keys = {"auto_uat", "auto_uat_timeout", "auto_plan_approval",
                     "auto_plan_single_step", "escalation_threshold",
-                    "budget_limit", "budget_per_agent", "notifications"}
+                    "budget_limit", "budget_per_agent", "notifications",
+                    "add_dirs"}
     updated = {}
     with lock:
         for key, value in data.items():
@@ -305,3 +306,16 @@ def get_audit(limit: int = 100, actor: str = "", action: str = ""):
     if action:
         result = [e for e in result if e.get("action") == action]
     return result[-limit:]
+
+@router.post("/shutdown")
+def shutdown_system():
+    """Gracefully shut down the entire system (hub + agents)."""
+    import os, signal, threading
+    from hub.state import save_state
+    logger.info("Shutdown requested from dashboard")
+    save_state()
+    def _do_shutdown():
+        import time; time.sleep(1)
+        os.kill(os.getpid(), signal.SIGTERM)
+    threading.Thread(target=_do_shutdown, daemon=True).start()
+    return {"status": "ok", "message": "Shutting down..."}

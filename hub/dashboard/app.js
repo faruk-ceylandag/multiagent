@@ -196,10 +196,8 @@ function _applyDashboardData(d) {
   if (d.version) _lastVersion = d.version;
   data = d;
   if (!data._config) fetchConfig();
-  // Render workspace bar if multiple workspaces
-  if (d.workspaces && Object.keys(d.workspaces).length > 0) {
-    renderWorkspaceBar(d.workspaces);
-  }
+  // Always render workspace bar (show primary + add button even when empty)
+  renderWorkspaceBar(d.workspaces || {});
   const names = d.agent_names || [];
   if (d.inbox && Array.isArray(d.inbox)) {
     const prev = inbox.length;
@@ -628,93 +626,113 @@ const _reExitCode = /◼\s*exit=(\d+)/;
 const _reToolUse = /🔧\s*(\w+)(?::?\s*(.*))?$/;
 const _reTextStream = /^\s*💬\s*/;
 
+function _ts(line){
+  // Extract and format timestamp: [HH:MM:SS] → subtle prefix
+  const m=line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*/);
+  if(!m)return{ts:'',rest:line};
+  return{ts:`<span class="log-ts">${m[1]}</span>`,rest:line.slice(m[0].length)};
+}
 function colorize(line){
   if(!line||typeof line!=='string')return'';
+  const{ts,rest}=_ts(line);
   // User prompt
-  if(line.startsWith('📨')||line.startsWith('  📨'))
-    return`<div class="user-prompt">${esc(line.replace(_reUserPrompt,''))}</div>`;
-  // Claude call start — ▶ claude #N [model] (chars)
-  const callMatch=line.match(_reCallStart);
+  if(rest.startsWith('📨')||line.startsWith('📨'))
+    return`<div class="user-prompt">${esc(rest.replace(_reUserPrompt,''))}</div>`;
+  // Claude call start — ▶ call #N [model] (chars)
+  const callMatch=rest.match(_reCallStart)||line.match(_reCallStart);
   if(callMatch){
     const num=callMatch[1],model=callMatch[2],chars=callMatch[3];
     const tagClass=model==='opus'?'model-tag-opus':model==='haiku'?'model-tag-haiku':'model-tag-sonnet';
-    return`<div class="log-call-header"><hr class="log-separator"><span>▶ call #${esc(num)}</span><span class="model-tag ${tagClass}">${esc(model)}</span><span style="color:var(--fg3)">${esc(chars)} chars</span></div>`;
+    return`<div class="log-call-header">${ts}<span>call #${esc(num)}</span><span class="model-tag ${tagClass}">${esc(model)}</span><span class="log-dim">${esc(chars)} chars</span></div>`;
   }
   // Call done — ◼ exit=0, N lines, N tools
-  const exitMatch=line.match(_reExitCode);
+  const exitMatch=rest.match(_reExitCode)||line.match(_reExitCode);
   if(exitMatch){
     const code=exitMatch[1];
     const cls=code==='0'?'log-exit-ok':'log-exit-err';
-    return`<span class="${cls}">${esc(line)}</span>`;
+    return`<span class="${cls}">${ts}${esc(rest)}</span>`;
   }
   // Token counts
-  if(line.includes('tokens:')&&(line.includes('in/')&&line.includes('out')))
-    return`<span class="log-tokens">${esc(line)}</span>`;
+  if(rest.includes('tokens:')&&rest.includes('in/')&&rest.includes('out'))
+    return`<span class="log-tokens">${ts}${esc(rest)}</span>`;
+  // Boot / system lines — dim them
+  if(rest.match(/^===\s*\w+\s*===$|^  (thinking|coding|hub ok|CLI:|🔗 MCP)/))
+    return`<span class="log-boot">${ts}${esc(rest)}</span>`;
+  // Agent joined — compact
+  if(rest.includes('👋 New agent joined'))
+    return`<span class="log-boot">${ts}${esc(rest)}</span>`;
+  // Task received — ← N msg(s)
+  if(rest.match(/^←\s*\d+\s*msg/))
+    return`<span class="log-dim">${ts}${esc(rest)}</span>`;
+  // Task content line [user] #N ...
+  if(rest.match(/^\s*\[user\]\s*#\d+/))
+    return`<div class="log-task-line">${ts}${esc(rest)}</div>`;
   // Chat reply — collapsible
-  if(line.includes('💬') && line.includes('Replied: ')){
-    const parts=line.split('Replied: ');
+  if(rest.includes('💬') && rest.includes('Replied: ')){
+    const parts=rest.split('Replied: ');
     const body=parts.slice(1).join('Replied: ');
     const preview=body.substring(0,80)+(body.length>80?'…':'');
-    return`<details class="chat-reply-block"><summary class="text-stream">💬 ${esc(preview)}</summary><div class="chat-reply-body">${esc(body)}</div></details>`;
+    return`<details class="chat-reply-block"><summary class="text-stream">${ts}${esc(preview)}</summary><div class="chat-reply-body">${esc(body)}</div></details>`;
   }
   // Chat incoming — collapsible
-  if(line.includes('💬') && line.includes('Chat from ')){
-    const parts=line.split(': ');
+  if(rest.includes('💬') && rest.includes('Chat from ')){
+    const parts=rest.split(': ');
     const header=parts[0];
     const body=parts.slice(1).join(': ');
     const preview=body.substring(0,80)+(body.length>80?'…':'');
-    return`<details class="chat-reply-block"><summary class="text-stream">${esc(header)}: ${esc(preview)}</summary><div class="chat-reply-body">${esc(body)}</div></details>`;
+    return`<details class="chat-reply-block"><summary class="text-stream">${ts}${esc(header)}: ${esc(preview)}</summary><div class="chat-reply-body">${esc(body)}</div></details>`;
   }
   // Text streaming (Claude output)
-  if(line.includes('💬'))
-    return`<span class="text-stream">${esc(line.replace(_reTextStream,''))}</span>`;
+  if(rest.includes('💬'))
+    return`<span class="text-stream">${esc(rest.replace(_reTextStream,''))}</span>`;
   // Hub calls — humanized
-  if(line.includes('📡')){
-    const h=humanizeHubLog(line);
+  if(rest.includes('📡')){
+    const h=humanizeHubLog(rest);
     if(h.hidden&&_hideHubNoise)return`<span class="hub-call-hidden"></span>`;
-    if(h.text!==line)return`<span class="hub-call-human">${esc(h.text)}</span>`;
-    return`<span class="hub-call">${esc(line)}</span>`;
+    if(h.text!==rest)return`<span class="hub-call-human">${ts}${esc(h.text)}</span>`;
+    return`<span class="hub-call">${ts}${esc(rest)}</span>`;
   }
   // Tool use with badges
-  if(line.includes('🔧')){
-    const toolMatch=line.match(_reToolUse);
+  if(rest.includes('🔧')){
+    const toolMatch=rest.match(_reToolUse);
     if(toolMatch){
       const tool=toolMatch[1],detail=toolMatch[2]||'';
       const tl=tool.toLowerCase();
       const badgeClass=tl==='bash'?'tool-badge-bash':tl==='edit'||tl==='write'?'tool-badge-edit':
         tl==='read'||tl==='view'?'tool-badge-read':tl==='webfetch'||tl==='websearch'?'tool-badge-web':
         tl==='task'?'tool-badge-task':'tool-badge-default';
-      return`<span class="tool"><span class="tool-badge ${badgeClass}">${esc(tool)}</span>${detail?` ${esc(detail)}`:''}</span>`;
+      return`<span class="tool">${ts}<span class="tool-badge ${badgeClass}">${esc(tool)}</span>${detail?` <span class="log-dim">${esc(detail)}</span>`:''}</span>`;
     }
-    return`<span class="tool">${esc(line)}</span>`;
+    return`<span class="tool">${ts}${esc(rest)}</span>`;
   }
   // Errors
-  if(line.includes('✗')||line.includes('ERROR')||line.includes('FAIL'))
-    return`<span class="error">${esc(line)}</span>`;
-  if(line.includes('⛔'))
-    return`<span class="error">${esc(line)}</span>`;
+  if(rest.includes('✗')||rest.includes('ERROR')||rest.includes('FAIL')||rest.includes('⛔'))
+    return`<span class="error">${ts}${esc(rest)}</span>`;
   // Success
-  if(line.includes('✓')||line.includes('PASS')||line.includes('ONLINE'))
-    return`<span class="ok">${esc(line)}</span>`;
-  // Rate limit / warnings
-  if(line.includes('⚠')||line.includes('rate limit'))
-    return`<span class="text-yellow">${esc(line)}</span>`;
+  if(rest.includes('✓')||rest.includes('PASS'))
+    return`<span class="ok">${ts}${esc(rest)}</span>`;
+  // Online
+  if(rest.includes('ONLINE'))
+    return`<span class="log-online">${ts}${esc(rest)}</span>`;
+  // Done summary
+  if(rest.match(/^✓ done/))
+    return`<span class="log-done">${ts}${esc(rest)}</span>`;
+  // Warnings
+  if(rest.includes('⚠')||rest.includes('rate limit'))
+    return`<span class="text-yellow">${ts}${esc(rest)}</span>`;
   // Learning
-  if(line.includes('🧠'))
-    return`<span class="text-cyan">${esc(line)}</span>`;
+  if(rest.includes('🧠'))
+    return`<span class="text-cyan">${ts}${esc(rest)}</span>`;
   // Cost
-  if(line.includes('💰'))
-    return`<span class="text-yellow">${esc(line)}</span>`;
+  if(rest.includes('💰'))
+    return`<span class="text-yellow">${ts}${esc(rest)}</span>`;
   // Git
-  if(line.includes('📌')||line.includes('🌿'))
-    return`<span class="text-green">${esc(line)}</span>`;
-  // Stop/cancel
-  if(line.includes('⏱'))
-    return`<span class="text-yellow">${esc(line)}</span>`;
-  // Boot
-  if(line.includes('🟢')||line.includes('ONLINE'))
-    return`<span class="text-green font-bold">${esc(line)}</span>`;
-  return`<span>${esc(line)}</span>`;
+  if(rest.includes('📌')||rest.includes('🌿'))
+    return`<span class="text-green">${ts}${esc(rest)}</span>`;
+  // Cache hit
+  if(rest.includes('📦'))
+    return`<span class="log-dim">${ts}${esc(rest)}</span>`;
+  return`<span>${ts}${esc(rest)}</span>`;
 }
 
 // ══════════════════════════════════
@@ -999,6 +1017,12 @@ function renderAlerts(p) {
 let taskSearch='', taskFilterAgent='', taskFilterPriority='';
 
 function renderTasks(p){
+  // Preserve new-task input values across re-renders
+  const _savedDesc=$('newTaskDesc')?.value||'';
+  const _savedAgent=$('newTaskAgent')?.value||'';
+  const _savedDeps=$('newTaskDeps')?.value||'';
+  const _focusedInTask=document.activeElement?.id;
+
   let taskList=data.tasks||[];
   if(activeWorkspace!=='all'){
     taskList=taskList.filter(t=>{
@@ -1053,6 +1077,11 @@ function renderTasks(p){
   ${allTasks.some(t=>t.depends_on?.length)?`<div class="dep-graph"><h3>🔗 Dependency Graph</h3><canvas id="depCanvas" width="600" height="200"></canvas></div>`:''}`;
   // Draw dependency graph
   if(allTasks.some(t=>t.depends_on?.length))setTimeout(()=>drawDepGraph(allTasks),50);
+  // Restore saved input values
+  if(_savedDesc){const el=$('newTaskDesc');if(el)el.value=_savedDesc;}
+  if(_savedAgent){const el=$('newTaskAgent');if(el)el.value=_savedAgent;}
+  if(_savedDeps){const el=$('newTaskDeps');if(el)el.value=_savedDeps;}
+  if(_focusedInTask&&_focusedInTask.startsWith('newTask')){const el=$(_focusedInTask);if(el)el.focus();}
 }
 
 function statusIcon(s){return{created:'📋',assigned:'👤',in_progress:'⚙️',in_review:'🔍',done:'✅',failed:'❌',cancelled:'🚫'}[s]||'•';}
@@ -1699,16 +1728,18 @@ async function saveAutonomySettings() {
 function renderWorkspaceBar(workspaces) {
   const bar = $('workspaceBar');
   if (!bar) return;
-  const wsList = Object.values(workspaces || {});
-  if (wsList.length <= 0) { bar.style.display = 'none'; return; }
+  const wsEntries = Object.entries(workspaces || {});
   bar.style.display = 'flex';
-  let html = `<button class="ws-tab${activeWorkspace === 'all' ? ' ws-active' : ''}" onclick="switchWorkspace('all')">All</button>`;
   const wsName = data.workspace ? data.workspace.split('/').pop() : 'primary';
-  html += `<button class="ws-tab${activeWorkspace === 'primary' ? ' ws-active' : ''}" onclick="switchWorkspace('primary')">${esc(wsName)}</button>`;
-  for (const ws of wsList) {
-    const id = ws.ws_id || '';
-    if (!id || ws.is_primary) continue;
-    html += `<button class="ws-tab${activeWorkspace === id ? ' ws-active' : ''}" onclick="switchWorkspace('${escAttr(id)}')">${esc(ws.name || id)}</button>`;
+  let html = '';
+  if (wsEntries.length > 0) {
+    html += `<button class="ws-tab${activeWorkspace === 'all' ? ' ws-active' : ''}" onclick="switchWorkspace('all')">All</button>`;
+    html += `<button class="ws-tab${activeWorkspace === 'primary' ? ' ws-active' : ''}" onclick="switchWorkspace('primary')">${esc(wsName)}</button>`;
+    for (const [wsId, ws] of wsEntries) {
+      html += `<button class="ws-tab${activeWorkspace === wsId ? ' ws-active' : ''}" onclick="switchWorkspace('${escAttr(wsId)}')">${esc(ws.name || wsId)} <span class="ws-remove" onclick="event.stopPropagation();removeWorkspace('${escAttr(wsId)}','${escAttr(ws.name || wsId)}')" title="Remove workspace">&times;</span></button>`;
+    }
+  } else {
+    html += `<button class="ws-tab ws-active">${esc(wsName)}</button>`;
   }
   html += `<button class="ws-tab ws-add" onclick="showAddWorkspaceModal()" title="Add workspace">+</button>`;
   bar.innerHTML = html;
@@ -1751,6 +1782,18 @@ async function addWorkspace() {
       toast('Workspace added: ' + (alias || path.split('/').pop()), 'success');
       document.querySelector('.modal-overlay')?.remove();
       switchWorkspace(r.ws_id);
+    } else toast(r.message || 'Failed', 'error');
+  } catch (e) { toast('Error: ' + e, 'error'); }
+}
+
+async function removeWorkspace(wsId, name) {
+  if (!confirm('Remove workspace "' + name + '"?')) return;
+  try {
+    const r = await (await fetch(HUB + '/workspaces/' + wsId, { method: 'DELETE' })).json();
+    if (r.status === 'ok') {
+      toast('Workspace removed: ' + name, 'success');
+      if (activeWorkspace === wsId) activeWorkspace = 'all';
+      poll();
     } else toast(r.message || 'Failed', 'error');
   } catch (e) { toast('Error: ' + e, 'error'); }
 }
@@ -2232,8 +2275,39 @@ const _slashCommands={
   '/context':{desc:'Show agent context info',args:''},
   '/theme':{desc:'Toggle light/dark theme',args:''},
   '/connect':{desc:'Connect external service',args:'[service]'},
+  '/add-dir':{desc:'Add directory for agents',args:'<path>'},
+  '/remove-dir':{desc:'Remove added directory',args:'<path>'},
+  '/dirs':{desc:'Show added directories',args:''},
 };
 
+async function _addDir(path){
+  try{
+    const cfg=await(await fetch(HUB+'/config')).json();
+    const dirs=cfg.add_dirs||[];
+    if(dirs.includes(path)){toast('Already added: '+path,'warn');return;}
+    dirs.push(path);
+    const r=await(await fetch(HUB+'/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({add_dirs:dirs})})).json();
+    if(r.updated&&r.updated.add_dirs!==undefined){toast('Directory added: '+path,'success');}
+    else toast('Failed: '+(r.message||'unknown'),'error');
+  }catch(e){toast('Error: '+e,'error');}
+}
+async function _removeDir(path){
+  try{
+    const cfg=await(await fetch(HUB+'/config')).json();
+    const dirs=(cfg.add_dirs||[]).filter(d=>d!==path);
+    const r=await(await fetch(HUB+'/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({add_dirs:dirs})})).json();
+    if(r.updated&&r.updated.add_dirs!==undefined){toast('Directory removed: '+path,'success');}
+    else toast('Not found or failed','warn');
+  }catch(e){toast('Error: '+e,'error');}
+}
+async function _showDirs(){
+  try{
+    const cfg=await(await fetch(HUB+'/config')).json();
+    const dirs=cfg.add_dirs||[];
+    if(!dirs.length){toast('No extra directories configured','info');return;}
+    toast('Directories: '+dirs.join(', '),'info',5000);
+  }catch(e){toast('Error: '+e,'error');}
+}
 function _handleSlashCommand(text){
   const parts=text.split(/\s+/);
   const cmd=parts[0].toLowerCase();
@@ -2260,6 +2334,14 @@ function _handleSlashCommand(text){
       localStorage.setItem('ma-theme',next);
       toast('Theme: '+next,'info',2000);break;
     case '/connect': showServiceWizard(args||undefined);break;
+    case '/add-dir':
+      if(!args){toast('Usage: /add-dir /path/to/directory','warn');break;}
+      _addDir(args.trim());break;
+    case '/remove-dir':
+      if(!args){toast('Usage: /remove-dir /path/to/directory','warn');break;}
+      _removeDir(args.trim());break;
+    case '/dirs':
+      _showDirs();break;
     case '/model':
       if(!sel){toast('Select an agent first','warn');break;}
       if(!args){toast('Usage: /model <model-name>','warn');break;}
@@ -2430,6 +2512,14 @@ function updateRouteHint(text){
   }catch{hint.style.display='none';}},600);
 }
 
+async function shutdownSystem(){
+  if(!confirm('Shut down the entire multi-agent system? (hub + all agents)'))return;
+  try{
+    toast('Shutting down...','info',3000);
+    await fetch(HUB+'/shutdown',{method:'POST'});
+    setTimeout(()=>{document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--fg3);font-size:14px;font-family:monospace">System shut down. Close this tab.</div>';},1000);
+  }catch(e){toast('Shutdown signal sent','info',3000);}
+}
 async function exportSession(){try{
   const fmt=event?.altKey?'json':'md';
   const r=await fetch(HUB+'/export?fmt='+fmt);
