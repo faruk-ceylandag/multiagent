@@ -200,9 +200,9 @@ def generate_settings_json(hooks, permissions=None, agent_name=""):
     try:
         from ecosystem.mcp.setup_mcp import MCP_SERVERS
         all_mcp_names = list(MCP_SERVERS.keys())
-        # Only stdio servers go in .mcp.json — HTTP/SSE are user-level only
-        enabled_mcp = [name for name, spec in MCP_SERVERS.items()
-                       if spec.get("type", "stdio") == "stdio"]
+        # All known MCP servers — stdio are in .mcp.json, SSE are user-level
+        # but both need to be in enabledMcpjsonServers so agents can use them
+        enabled_mcp = list(MCP_SERVERS.keys())
     except ImportError:
         all_mcp_names = []
         enabled_mcp = []
