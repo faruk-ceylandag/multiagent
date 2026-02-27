@@ -249,6 +249,8 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
     _model_failed = False
     succeeded = False
 
+    _baseline_tokens = ctx.session_tokens  # safe baseline before any retries
+
     for attempt in range(1, retries + 1):
         if _model_failed and "opus" in model:
             model = ctx.MODEL_SONNET
@@ -259,7 +261,9 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
             log(ctx, f"▶ claude #{ctx.claude_calls} [{model_tag}] ({len(prompt)} chars)")
             report_progress(ctx, "call_start", f"#{ctx.claude_calls} [{model_tag}]")
             ctx._last_output_lines = []
-            ctx._pre_call_tokens = ctx.session_tokens  # snapshot for live token tracking
+            # Reset to baseline on retries to avoid double-counting failed call's live tokens
+            ctx.session_tokens = _baseline_tokens
+            ctx._pre_call_tokens = _baseline_tokens
 
             cmd = ["claude"]
             if ctx.AGENT_NAME == "architect":

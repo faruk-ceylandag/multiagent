@@ -448,13 +448,28 @@ def agent_rate_limited(data: dict):
 def agent_progress_update(data: dict):
     name = data.get("agent_name", "")
     with lock:
+        task_id = data.get("task_id", "")
+        # Calculate per-task cost from hub's usage tracking
+        task_cost = 0
+        if task_id:
+            task_key = f"_task_{task_id}"
+            from hub.state import usage_log, _PRICING
+            tu = usage_log.get(task_key, {})
+            if tu:
+                si, so = tu.get("sonnet_in", 0), tu.get("sonnet_out", 0)
+                oi, oo = tu.get("opus_in", 0), tu.get("opus_out", 0)
+                hi, ho = tu.get("haiku_in", 0), tu.get("haiku_out", 0)
+                task_cost = ((si/1e6)*_PRICING["sonnet_in"] + (so/1e6)*_PRICING["sonnet_out"] +
+                             (oi/1e6)*_PRICING["opus_in"] + (oo/1e6)*_PRICING["opus_out"] +
+                             (hi/1e6)*_PRICING["haiku_in"] + (ho/1e6)*_PRICING["haiku_out"])
         agent_progress[name] = {
             "event": data.get("event", ""), "detail": data.get("detail", ""),
-            "task_id": data.get("task_id", ""), "time": datetime.now().isoformat(),
+            "task_id": task_id, "time": datetime.now().isoformat(),
             "task_tokens": data.get("task_tokens", 0),
             "task_calls": data.get("task_calls", 0),
             "elapsed": data.get("elapsed", 0),
             "project": data.get("project", ""),
+            "task_cost": round(task_cost, 5),
         }
         bump_version()
     return {"status": "ok"}

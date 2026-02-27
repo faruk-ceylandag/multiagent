@@ -790,7 +790,7 @@ function updateLogHeader() {
   const prog = agentInfo.progress || {};
   const liveToks = prog.task_tokens || 0;
   const liveCalls = prog.task_calls || 0;
-  const liveCost = agentInfo.cost || 0;
+  const liveCost = prog.task_cost || 0;
   const _rawProject = prog.project || '';
   const liveProject = _rawProject && _rawProject !== '.' ? _rawProject : '';
   const serverElapsed = prog.elapsed || 0;
@@ -876,7 +876,7 @@ function renderLogs(p){
   const hiddenCount = totalLines - visibleLines.length;
   const prog=agentInfo.progress||{};
   const liveToks=prog.task_tokens||0;const liveCalls=prog.task_calls||0;
-  const liveCost=agentInfo.cost||0;
+  const liveCost=prog.task_cost||0;
   const _rawProject=prog.project||'';
   const liveProject=_rawProject&&_rawProject!=='.'?_rawProject:'';
   // Calculate elapsed client-side from server timestamp for real-time updates
