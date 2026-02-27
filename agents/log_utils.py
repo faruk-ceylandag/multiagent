@@ -31,7 +31,8 @@ _HUB_PATTERNS = [
 def log(ctx, msg):
     ts = datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
-    print(line, flush=True)
+    # stdout is redirected to log file by start.py, and hub also writes to the same file
+    # via _append_log_disk — only write to buffer (hub push) to avoid duplicate lines
     with ctx._log_lock:
         ctx._log_buf.append(line)
 

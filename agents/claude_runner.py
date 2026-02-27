@@ -263,8 +263,8 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
 
             cmd = ["claude"]
             if ctx.AGENT_NAME == "architect":
-                # Architect can read codebase (for better plans) but NOT write code
-                cmd.extend(["--allowedTools", "Read,Glob,Grep,Bash(curl*),mcp__*,WebFetch,WebSearch,Task"])
+                # Architect delegates fast — no codebase reading, only MCP + file listing
+                cmd.extend(["--allowedTools", "Glob,Bash(curl*),mcp__*,WebFetch,WebSearch,Task"])
                 cmd.extend(["--permission-mode", "plan"])
             else:
                 cmd.extend(["--allowedTools", "Edit,Write,Read,Bash(*),mcp__*"])

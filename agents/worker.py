@@ -489,8 +489,7 @@ if not os.path.exists(pf):
     except ImportError:
         _mcp_perms = []
     if ctx.AGENT_NAME == "architect":
-        perms = {"allow": ["Read", "Bash(curl*)", "Bash(cat*)", "Bash(ls*)", "Bash(find*)",
-                           "Bash(grep*)", "Bash(head*)", "Bash(tail*)", "Bash(wc*)"] + _mcp_perms, "deny": ["Edit", "Write"]}
+        perms = {"allow": ["Glob", "Bash(curl*)"] + _mcp_perms, "deny": ["Edit", "Write", "Read"]}
     else:
         perms = {"allow": ["Edit", "Write", "Read", "Bash(*)"] + _mcp_perms, "deny": []}
     with open(pf, "w") as f:
@@ -1311,7 +1310,7 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
 {{contracts}}
 {{roster}}
 {{project_ctx}}{{mcp_tools}}
-ACT FAST. Read the task → create a PLAN PROPOSAL. Do NOT over-analyze.
+ACT FAST. Read the task → create a PLAN PROPOSAL immediately. Do NOT explore the codebase. Do NOT read source files. Do NOT analyze architecture. The dev agents will read the code themselves.
 
 PLAN PROPOSAL (send ONE curl with ALL steps):
 curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{
