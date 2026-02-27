@@ -260,7 +260,7 @@ function renderSidebar(names) {
     const ps = a.pipeline||'offline';
     const dot = ps==='working'?'working':ps==='booting'?'booting':ps==='verifying'?'verifying':
                 a.status==='rate_limited'?'rate-limited':a.status==='unresponsive'?'unresponsive':
-                ps==='idle'?'idle':'offline';
+                a.status==='stopped'?'offline':ps==='idle'?'idle':'offline';
     const rlB = a.rate_limited_sec>0?`<span class="rl-badge">${a.rate_limited_sec}s</span>`:'';
     const prog = buildAgentProgress(a);
     const cost = a.cost?`<span class="agent-cost">${formatCost(a.cost)}</span>`:'';
@@ -269,9 +269,10 @@ function renderSidebar(names) {
     const exp = a.expertise?`<span class="agent-exp" title="Expertise">★${a.expertise}</span>`:'';
     const queueCount = (data.tasks||[]).filter(t=>t.assigned_to===n&&['created','assigned','in_progress'].includes(t.status)).length;
     const qBadge = queueCount?`<span class="queue-badge" title="${queueCount} task${queueCount>1?'s':''} in queue">${queueCount}</span>`:'';
+    const isStopped = a.status==='stopped'||a.detail==='stopped by user';
     const actions = isHidden ? '' : `<div class="agent-actions">
         <button onclick="event.stopPropagation();editAgent('${escAttr(n)}')" title="Edit">✎</button>
-        <button onclick="event.stopPropagation();stopAgent('${escAttr(n)}')" title="Stop">■</button>
+        ${isStopped?`<button onclick="event.stopPropagation();resumeAgent('${escAttr(n)}')" title="Resume" style="color:var(--green)">▶</button>`:`<button onclick="event.stopPropagation();stopAgent('${escAttr(n)}')" title="Stop">■</button>`}
         <button onclick="event.stopPropagation();removeAgent('${escAttr(n)}')" title="Remove">✕</button>
       </div>`;
     return `<div class="agent-card${n===sel?' sel':''}${isHidden?' agent-hidden':''}" onclick="selectAgent('${escAttr(n)}')">
@@ -2185,6 +2186,15 @@ async function stopAgent(n){
     if(r.status==='ok'){notify('⛔ Stop signal sent to '+n);}
     else{notify('Error stopping '+n);}
   }catch{notify('Failed to stop '+n);}
+  setTimeout(poll,500);
+}
+
+async function resumeAgent(n){
+  try{
+    const r=await(await fetch(HUB+'/agents/'+n+'/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+    if(r.status==='ok'){notify('▶ Resume signal sent to '+n);}
+    else{notify('Error resuming '+n);}
+  }catch{notify('Failed to resume '+n);}
   setTimeout(poll,500);
 }
 

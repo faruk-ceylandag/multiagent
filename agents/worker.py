@@ -591,10 +591,24 @@ while True:
             if ctx.current_task_id:
                 update_task_status(ctx, ctx.current_task_id, "cancelled", "stopped by user")
             unlock_all(ctx)
-            set_status(ctx, "idle", "stopped by user")
-            with ctx._stop_lock:
-                ctx._should_stop = False
+            set_status(ctx, "stopped", "stopped by user")
             ctx.current_task_id = None
+            # Stay stopped until resume signal from hub
+            log(ctx, "⏸ Agent paused — waiting for resume signal")
+            while True:
+                time.sleep(5)
+                resp = hub_post(ctx, f"/poll/{ctx.AGENT_NAME}", {}, timeout=5)
+                if not resp:
+                    continue
+                if resp.get("resume"):
+                    log(ctx, "▶ Resumed by user")
+                    with ctx._stop_lock:
+                        ctx._should_stop = False
+                    set_status(ctx, "idle", "resumed")
+                    break
+                if resp.get("stop"):
+                    # Another stop while already stopped — ignore
+                    continue
             continue
 
         cnt = poll_resp.get("count", 0)

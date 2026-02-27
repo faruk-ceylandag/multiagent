@@ -94,6 +94,7 @@ changes: List[dict] = []
 change_counter = 0
 activity: deque = deque(maxlen=500)
 stop_signals: Dict[str, bool] = {}
+resume_signals: Dict[str, bool] = {}
 agent_pids = {}  # agent_name → PID
 analytics_log: List[dict] = []
 MAX_ANALYTICS = 1000
@@ -680,6 +681,7 @@ def reset_session():
         file_locks.clear()
         file_plans.clear()
         stop_signals.clear()
+        resume_signals.clear()
         agent_progress.clear()
         sessions.clear()
         # Clear MCP cache (stale Jira/Figma/GitHub content from old sessions)

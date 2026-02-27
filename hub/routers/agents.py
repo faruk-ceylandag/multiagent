@@ -7,7 +7,7 @@ from fastapi import APIRouter
 
 from hub.state import (
     lock, logger, MA_DIR, WORKSPACE, ALL_AGENTS, agents, pipeline, log_buffers, log_counters,
-    stop_signals, agent_pids, rate_limited_agents, agent_progress, agent_specialization,
+    stop_signals, resume_signals, agent_pids, rate_limited_agents, agent_progress, agent_specialization,
     agent_learnings, agent_roles, messages, tasks, AgentStatus, add_activity, save_state,
     ROUTE_MAP, MULTI_SCOPE_KEYWORDS, bump_version,
 )
@@ -428,7 +428,8 @@ def combined_poll(name: str, timeout: int = 0):
             agents[name]["last_seen"] = datetime.now().isoformat()
     count = len(messages.get(name, []))
     should_stop = stop_signals.pop(name, False)
-    return {"status": "ok", "count": count, "stop": should_stop}
+    should_resume = resume_signals.pop(name, False)
+    return {"status": "ok", "count": count, "stop": should_stop, "resume": should_resume}
 
 @router.post("/agents/status")
 def agent_status(s: AgentStatus):
@@ -581,7 +582,15 @@ def stop_agent(name: str):
 def restart_agent(name: str):
     with lock:
         pipeline[name] = {"status": "restarting", "detail": "restart requested", "since": datetime.now().isoformat()}
+        resume_signals[name] = True
         add_activity("user", name, "restart", f"Restart requested for {name}")
+    return {"status": "ok"}
+
+@router.post("/agents/{name}/resume")
+def resume_agent(name: str):
+    with lock:
+        resume_signals[name] = True
+        add_activity("user", name, "resume", f"Resume signal sent to {name}")
     return {"status": "ok"}
 
 
