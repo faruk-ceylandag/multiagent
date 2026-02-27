@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("hub")
 
-lock = threading.Lock()
+lock = threading.RLock()
 _shutdown_event = threading.Event()
 _state_initialized = False
 
