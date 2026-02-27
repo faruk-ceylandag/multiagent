@@ -114,9 +114,9 @@ def _is_single_file_task(prompt):
 def classify_prompt(prompt, role="", model_policy=None):
     """Classify prompt into model tier: opus/sonnet/haiku.
     Role-aware: architect always sonnet, reviewers always haiku, system notifications capped at sonnet."""
-    # Architect only delegates — never needs opus
+    # Architect only delegates — haiku is sufficient for URL read + plan curl
     if role == "architect":
-        return "sonnet"
+        return "haiku"
     # Logic reviewer uses sonnet (catches bugs, race conditions, edge cases)
     # Other reviewers use haiku — simple style/arch checks
     if role and role.startswith("reviewer"):
@@ -263,8 +263,8 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
 
             cmd = ["claude"]
             if ctx.AGENT_NAME == "architect":
-                # Architect delegates fast — no codebase reading, only MCP + file listing
-                cmd.extend(["--allowedTools", "Glob,Bash(curl*),mcp__*,WebFetch,WebSearch,Task"])
+                # Architect delegates fast — only MCP reads + curl for plan proposal
+                cmd.extend(["--allowedTools", "Read,Bash(curl*),Bash(jq*),Bash(cat*),mcp__*"])
                 cmd.extend(["--permission-mode", "plan"])
             else:
                 cmd.extend(["--allowedTools", "Edit,Write,Read,Bash(*),mcp__*"])

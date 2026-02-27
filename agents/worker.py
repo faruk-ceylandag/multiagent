@@ -415,6 +415,110 @@ _URL_MCP_MAP = [
     (r'playwright\.dev', 'playwright'),
 ]
 
+def _prefetch_url_content(ctx, task_text):
+    """Pre-fetch URL content for architect so it doesn't need MCP calls.
+    Returns (content_str, external_id) — content to inject into prompt."""
+    from .log_utils import log
+    urls = re.findall(r'https?://\S+', task_text)
+    if not urls:
+        return "", ""
+
+    results = []
+    external_id = ""
+
+    for url in urls[:3]:  # max 3 URLs
+        url_clean = url.rstrip(".,;:!?)")
+
+        # ── Jira / Atlassian ──
+        jira_match = re.search(r'atlassian\.net/browse/([A-Z]+-\d+)', url_clean)
+        if jira_match:
+            issue_key = jira_match.group(1)
+            external_id = external_id or issue_key
+            try:
+                # Use Atlassian REST API v2 via MCP fetch
+                resp = hub_post(ctx, "/cache", {"key": f"jira_{issue_key}", "source": "jira"})
+                # Check if already cached
+                cached = hub_get(ctx, f"/cache/jira_{issue_key}")
+                if cached and cached.get("content"):
+                    results.append(f"[JIRA {issue_key}]\n{cached['content']}")
+                    continue
+            except Exception:
+                pass
+            # Fallback: use claude CLI with haiku for a quick MCP read
+            try:
+                _haiku = getattr(ctx, "MODEL_HAIKU", "claude-haiku-4-5-20251001")
+                fetch_prompt = f"Read Jira ticket {issue_key} using mcp__atlassian__getJiraIssue. Output ONLY: Title, Status, Priority, Description (first 500 chars), and Acceptance Criteria. No commentary."
+                proc = subprocess.run(
+                    ["claude", "-p", fetch_prompt, "--model", _haiku,
+                     "--allowedTools", "mcp__*,Read,Bash(jq*),Bash(cat*)",
+                     "--output-format", "text", "--max-turns", "3"],
+                    capture_output=True, text=True, timeout=45,
+                    cwd=ctx.AGENT_CWD,
+                    env={**os.environ, **_load_creds_env(ctx)},
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    content = proc.stdout.strip()[:2000]
+                    results.append(f"[JIRA {issue_key}]\n{content}")
+                    # Cache it for agents
+                    hub_post(ctx, "/cache", {"key": f"jira_{issue_key}", "content": content,
+                                             "source": "jira", "description": f"Jira ticket {issue_key}"})
+                    log(ctx, f"📋 Pre-fetched Jira {issue_key}")
+                    continue
+            except Exception as e:
+                log(ctx, f"⚠ Jira pre-fetch failed: {e}")
+
+        # ── GitHub ──
+        gh_issue = re.search(r'github\.com/([^/]+/[^/]+)/(?:issues|pull)/(\d+)', url_clean)
+        if gh_issue:
+            repo, num = gh_issue.group(1), gh_issue.group(2)
+            external_id = external_id or f"GH-{num}"
+            try:
+                kind = "pr" if "/pull/" in url_clean else "issue"
+                proc = subprocess.run(
+                    ["gh", kind, "view", num, "-R", repo, "--json",
+                     "title,body,state,labels,assignees"],
+                    capture_output=True, text=True, timeout=15)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    data = json.loads(proc.stdout)
+                    body = (data.get("body") or "")[:1500]
+                    labels = ", ".join(l.get("name", "") for l in data.get("labels", []))
+                    content = f"Title: {data.get('title', '')}\nState: {data.get('state', '')}\nLabels: {labels}\n\n{body}"
+                    results.append(f"[GITHUB {repo}#{num}]\n{content}")
+                    hub_post(ctx, "/cache", {"key": f"gh_{num}", "content": content,
+                                             "source": "github", "description": f"GitHub {kind} #{num}"})
+                    log(ctx, f"📋 Pre-fetched GitHub {kind} #{num}")
+                    continue
+            except Exception as e:
+                log(ctx, f"⚠ GitHub pre-fetch failed: {e}")
+
+        # ── Figma ──
+        figma_match = re.search(r'figma\.com/(?:design|file)/([^/]+)', url_clean)
+        if figma_match:
+            # Figma requires OAuth via MCP — include URL for architect to reference
+            results.append(f"[FIGMA URL] {url_clean}\nNote: Agents will read this via Figma MCP. Include full URL in step description with [USE FIGMA MCP] prefix.")
+            continue
+
+        # ── Sentry ──
+        if "sentry.io" in url_clean:
+            results.append(f"[SENTRY URL] {url_clean}\nNote: Agents will read this via Sentry MCP. Include full URL in step description with [USE SENTRY MCP] prefix.")
+            continue
+
+        # ── Unknown URL — pass through ──
+        results.append(f"[URL] {url_clean}")
+
+    if not results:
+        return "", external_id
+
+    content = "\n\n".join(results)
+    return content, external_id
+
+
+def _load_creds_env(ctx):
+    """Load credentials as env dict for subprocess calls."""
+    from .credentials import load_credentials
+    return load_credentials(ctx)
+
+
 def _detect_needed_mcps(task_text):
     """Detect which MCP servers are needed based on URLs/keywords in task text."""
     needed = set()
@@ -1220,8 +1324,14 @@ CRITICAL: When you see a URL from a known MCP domain (figma.com, github.com, sen
         eco_discovery = ""
         # task_text already computed above (line ~672)
 
+        prefetched_content = ""
         if _is_architect:
-            # Architect: minimal context, fast delegation
+            # Architect: pre-fetch URL content so it doesn't need MCP calls
+            _prefetched, _ext_id = _prefetch_url_content(ctx, task_text)
+            if _prefetched:
+                prefetched_content = f"\n=== PRE-FETCHED CONTENT (already read — do NOT re-fetch) ===\n{_prefetched}\n=== END PRE-FETCHED CONTENT ==="
+                if _ext_id:
+                    prefetched_content += f"\nEXTERNAL_ID: {_ext_id}"
             eco_hints = get_smart_hints(task_text, ctx.current_project, ctx.MA_DIR, ctx.HUB_URL, role="architect")
             ctx._active_pattern_ids = []
         else:
@@ -1336,16 +1446,13 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
             task_tpl = load_template(ctx, "task_architect", """You are {{agent}} — the team coordinator.{{role_ctx}}
 === TASK ===
 {{messages}}
+{{prefetched}}
 {{contracts}}
 {{roster}}
-{{project_ctx}}{{mcp_tools}}
-ACT FAST. You have a MAX 3 tool call budget. Read URL (if any) → create plan → done.
-NEVER explore the codebase. NEVER read source files. NEVER use Glob/Grep/Find/Task on code.
-NEVER use EnterPlanMode, ExitPlanMode, or Task tools — ONLY use the curl plan_proposal format below.
-NEVER spawn subagents. NEVER search code. The dev agents will explore and read the code themselves.
-Your ONLY job: read the URL via MCP → write the plan curl. Nothing else.
+{{project_ctx}}
+IMMEDIATELY create the plan using the curl below. Do NOT read URLs, explore code, or call any tools except this ONE curl.
+URL content has been pre-fetched above — use it directly. If no pre-fetched content, include the raw URL in step descriptions with [USE X MCP] prefix.
 
-PLAN PROPOSAL (send ONE curl with ALL steps):
 curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{
   "sender":"{{agent}}","receiver":"user","msg_type":"plan_proposal",
   "content":"Brief summary of the plan",
@@ -1358,22 +1465,13 @@ curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{
 }'
 
 RULES:
-1. SIMPLE TASK (one scope) → ONE step in the plan to the right specialist. Done.
-2. MULTI-SCOPE → max 2-3 steps. Chain with depends_on_step (index-based): dev(0) → QA(1, depends_on_step:0)
-3. ALWAYS copy ALL URLs, requirements, file paths into each step description. Agent has ZERO context otherwise.
-4. depends_on_step uses 0-based index within the plan_steps array.
-5. If task mentions a specific agent ("frontend fix X"), single step plan to that agent. Zero analysis.
-6. URL in task? Read it via MCP (1-2 calls max). Extract key info + external ID. If MCP fails, include raw URL + [USE X MCP] prefix.
-6b. ALWAYS extract external task ID from URLs: Jira→"PA-123", GitHub→"GH-42", Linear→"PRJ-55". Put it in EVERY step's task_external_id field. This is used for branch names and commit messages.
-6c. NO external ID? Leave task_external_id EMPTY — agent will continue on current branch. Do NOT invent branch names or use TASK-{id}.
-7. NEVER write code, edit files, or implement anything. ONLY plan.
-8. NEVER say "I can't" or ask user for help. ALWAYS create a plan. The worst case is a single step with just the URL.
-9. The user will review & approve the plan before tasks are created.
-10. ALWAYS add a QA step (depends_on the dev step) for verification. System auto-iterates if QA fails.
-
-MCP CONTENT CACHING — after reading MCP content, cache it so agents don't re-fetch:
-curl -s -X POST {{hub}}/cache -H 'Content-Type: application/json' -d '{"key":"SOURCE_KEYNAME","content":"CONTENT","source":"figma|jira|github|sentry|google","description":"Brief desc"}'
-Then reference in step descriptions: [CACHED:key_name]
+1. SIMPLE TASK (one scope) → ONE step to the right specialist. MULTI-SCOPE → max 2-3 steps.
+2. Copy ALL context (URLs, requirements, acceptance criteria) into each step description verbatim. Agent has ZERO other context.
+3. depends_on_step uses 0-based index. Chain: dev(0) → QA(1, depends_on_step:0).
+4. If task mentions a specific agent ("frontend fix X"), single step to that agent.
+5. Use EXTERNAL_ID from pre-fetched content in EVERY step's task_external_id. No ID? Leave empty.
+6. ALWAYS add a QA step (depends_on dev step) for verification.
+7. NEVER write code, explore, or read files. ONLY output the curl above.
 {{branch_info}}{{hints}}""")
         else:
             task_tpl = load_template(ctx, "task", """You are {{agent}}.{{role_ctx}}
@@ -1423,6 +1521,7 @@ RULES:
                                  url_workflow=url_instruction, hints=eco_hints,
                                  locked_files=lock_ctx,
                                  learned_patterns=learned_patterns_ctx,
+                                 prefetched=prefetched_content,
                                  current_branch=current_branch or "", current_project=ctx.current_project or "",
                                  task_id=ctx.current_task_id or "",
                                  contracts=f'=== CONTRACTS ===\n{contracts}' if contracts else '')
