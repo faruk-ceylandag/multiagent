@@ -312,7 +312,9 @@ def get_audit(limit: int = 100, actor: str = "", action: str = ""):
 
 @router.post("/shutdown")
 def shutdown_system():
-    """Gracefully shut down the entire system (hub + agents)."""
+    """Gracefully shut down the entire system (hub + agents).
+    Signals the parent start.py process (via PPID) so it runs its full cleanup
+    which kills all workers, claude CLIs, and MCP subprocesses."""
     import os
     import signal
     import threading
@@ -321,6 +323,15 @@ def shutdown_system():
     save_state()
     def _do_shutdown():
         import time; time.sleep(1)
+        # Signal parent process (start.py) to trigger full cleanup
+        ppid = os.getppid()
+        if ppid > 1:
+            try:
+                os.kill(ppid, signal.SIGTERM)
+                return  # Parent cleanup will kill us too
+            except OSError:
+                pass
+        # Fallback: kill ourselves if no parent
         os.kill(os.getpid(), signal.SIGTERM)
     threading.Thread(target=_do_shutdown, daemon=True).start()
     return {"status": "ok", "message": "Shutting down..."}

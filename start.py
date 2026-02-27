@@ -312,6 +312,54 @@ except Exception as e:
     log(f"⚠ Ecosystem setup: {e} — using basic permissions")
     for a in AGENT_NAMES: ensure_perms(os.path.join(MA_DIR, "sessions", a))
 
+# ── Pre-boot OAuth Authentication ──
+_auth_cache_path = os.path.expanduser("~/.claude/mcp-needs-auth-cache.json")
+_pending_oauth = {}
+if os.path.exists(_auth_cache_path):
+    try:
+        with open(_auth_cache_path) as f:
+            _pending_oauth = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        pass
+
+# Filter to only our registered OAuth MCPs
+try:
+    from ecosystem.mcp.setup_mcp import MCP_SERVERS as _MCP_REGISTRY
+    _our_oauth = {k: v for k, v in _MCP_REGISTRY.items()
+                  if k in _pending_oauth and v.get("type") in ("http", "sse")}
+except ImportError:
+    _our_oauth = {}
+
+if _our_oauth:
+    _names = ", ".join(_our_oauth.keys())
+    warn(f"OAuth pending for: {_names}")
+    print(f"  {DIM}These MCP servers need browser authentication.{NC}")
+    _answer = input("  Authenticate now? (Y/n): ").strip().lower()
+    if _answer != "n":
+        for _oname, _ospec in _our_oauth.items():
+            print(f"\n  \U0001f510 Authenticating {_oname}...")
+            # Clear cache entry so Claude retries OAuth
+            try:
+                with open(_auth_cache_path) as f:
+                    _cache = json.load(f)
+                _cache.pop(_oname, None)
+                with open(_auth_cache_path, "w") as f:
+                    json.dump(_cache, f)
+            except (OSError, json.JSONDecodeError):
+                pass
+            # Remove + re-add to trigger OAuth with TTY access
+            subprocess.run(["claude", "mcp", "remove", "--scope", "user", _oname],
+                           capture_output=True, timeout=10)
+            _oauth_result = subprocess.run(
+                ["claude", "mcp", "add", "--transport", _ospec["type"], _oname, _ospec["url"]],
+                stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, timeout=120,
+            )
+            if _oauth_result.returncode == 0:
+                log(f"{_oname} OAuth complete")
+            else:
+                warn(f"{_oname} OAuth may need manual setup")
+        print()
+
 # ── Deps ──
 try:
     import fastapi
@@ -455,6 +503,21 @@ try: import webbrowser; webbrowser.open(url)
 except Exception: pass
 
 # ── Cleanup ──
+def _get_all_child_pids(parent_pid):
+    """Recursively get all descendant PIDs of a process."""
+    children = []
+    try:
+        r = subprocess.run(["pgrep", "-P", str(parent_pid)], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.strip().split("\n"):
+            pid = line.strip()
+            if pid:
+                pid = int(pid)
+                children.append(pid)
+                children.extend(_get_all_child_pids(pid))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return children
+
 _cleanup_running = False
 def cleanup(sig=None, frame=None):
     global _cleanup_running
@@ -465,27 +528,68 @@ def cleanup(sig=None, frame=None):
     # Signal hub to save state before terminating
     try:
         import urllib.request
-        urllib.request.urlopen(f"{HUB_URL}/health", timeout=2)  # check if hub is alive
+        urllib.request.urlopen(f"{HUB_URL}/health", timeout=2)
     except Exception:
         pass
+
+    # Collect ALL descendant PIDs before killing (workers + their claude subprocesses)
+    all_pids = set()
     for name, w in workers.items():
         try:
-            # Kill entire process group (including MCP subprocesses)
+            pid = w["proc"].pid
+            all_pids.add(pid)
+            all_pids.update(_get_all_child_pids(pid))
+        except (OSError, ProcessLookupError):
+            pass
+
+    # Phase 1: SIGTERM — process groups + hub
+    for name, w in workers.items():
+        try:
             pgid = os.getpgid(w["proc"].pid)
             os.killpg(pgid, signal.SIGTERM)
         except (OSError, ProcessLookupError):
             try: w["proc"].terminate()
             except OSError: pass
+    try: hub_proc.terminate()
+    except OSError: pass
+
+    # Wait briefly for graceful shutdown
+    time.sleep(2)
+
+    # Phase 2: SIGKILL anything still alive (workers, claude CLIs, MCP servers)
     for name, w in workers.items():
-        try: w["proc"].wait(timeout=5)
-        except Exception:
-            try: w["proc"].kill()
-            except OSError: pass
-        try: w["log_fh"].close()
+        try:
+            pgid = os.getpgid(w["proc"].pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+        try: w["proc"].kill()
         except OSError: pass
-    try: hub_proc.terminate(); hub_proc.wait(timeout=5)
-    except Exception:
-        try: hub_proc.kill()
+    for pid in all_pids:
+        try: os.kill(pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError): pass
+
+    # Phase 3: Kill hub
+    try: hub_proc.kill(); hub_proc.wait(timeout=3)
+    except Exception: pass
+
+    # Phase 4: Sweep any orphaned processes from our session dirs
+    try:
+        r = subprocess.run(
+            ["pgrep", "-f", f"agents.worker.*{MA_DIR}|claude.*{MA_DIR}|uvicorn.*hub"],
+            capture_output=True, text=True, timeout=5)
+        my_pid = os.getpid()
+        for line in r.stdout.strip().split("\n"):
+            pid = line.strip()
+            if pid and int(pid) != my_pid:
+                try: os.kill(int(pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError): pass
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    # Close log handles
+    for name, w in workers.items():
+        try: w["log_fh"].close()
         except OSError: pass
     try: hub_log.close()
     except OSError: pass
