@@ -18,7 +18,7 @@ class AgentContext:
         # ── Config from env ──
         self.MODEL_SONNET = os.environ.get("MA_THINKING_MODEL", "claude-sonnet-4-5-20250929")
         self.MODEL_OPUS = os.environ.get("MA_CODING_MODEL", "claude-opus-4-6")
-        self.MODEL_HAIKU = os.environ.get("MA_HAIKU_MODEL", "claude-haiku-3-5-20241022")
+        self.MODEL_HAIKU = os.environ.get("MA_HAIKU_MODEL", "claude-haiku-4-5-20251001")
         self.AUTO_VERIFY = os.environ.get("MA_AUTO_VERIFY", "1") == "1"
         self.MAX_CONTEXT = int(os.environ.get("MA_MAX_CONTEXT", "30000"))
         self.MCP_SERVERS = json.loads(os.environ.get("MA_MCP_SERVERS", "{}"))

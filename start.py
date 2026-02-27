@@ -467,6 +467,7 @@ def launch_worker(agent_cfg):
     worker_env.pop("CLAUDECODE", None)  # Prevent nested Claude Code session detection
     worker_env["MA_THINKING_MODEL"] = cfg.get("thinking_model", "claude-sonnet-4-5-20250929")
     worker_env["MA_CODING_MODEL"] = cfg.get("coding_model", "claude-opus-4-6")
+    worker_env["MA_HAIKU_MODEL"] = cfg.get("haiku_model", "claude-haiku-4-5-20251001")
     worker_env["MA_AUTO_VERIFY"] = "1" if cfg.get("auto_verify", True) else "0"
     worker_env["MA_MAX_CONTEXT"] = str(cfg.get("max_context", 12000))
     _mcp_cfg = cfg.get("mcp_servers", {})
