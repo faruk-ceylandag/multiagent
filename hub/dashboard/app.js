@@ -260,7 +260,7 @@ function renderSidebar(names) {
     const ps = a.pipeline||'offline';
     const dot = ps==='working'?'working':ps==='booting'?'booting':ps==='verifying'?'verifying':
                 a.status==='rate_limited'?'rate-limited':a.status==='unresponsive'?'unresponsive':
-                a.status==='stopped'?'offline':ps==='idle'?'idle':'offline';
+                a.status==='stopped'?'stopped':ps==='idle'?'idle':'offline';
     const rlB = a.rate_limited_sec>0?`<span class="rl-badge">${a.rate_limited_sec}s</span>`:'';
     const prog = buildAgentProgress(a);
     const cost = a.cost?`<span class="agent-cost">${formatCost(a.cost)}</span>`:'';
@@ -786,7 +786,7 @@ function updateLogHeader() {
   if (!sel) return;
   const agentInfo = (data.agents || {})[sel] || {};
   const isWorking = agentInfo.pipeline === 'working';
-  const statusDot = isWorking ? 'dot-working' : agentInfo.pipeline === 'idle' ? 'dot-idle' : agentInfo.pipeline === 'booting' ? 'dot-booting' : 'dot-offline';
+  const statusDot = isWorking ? 'dot-working' : agentInfo.pipeline === 'idle' ? 'dot-idle' : agentInfo.pipeline === 'booting' ? 'dot-booting' : agentInfo.status === 'stopped' ? 'dot-stopped' : 'dot-offline';
   const prog = agentInfo.progress || {};
   const liveToks = prog.task_tokens || 0;
   const liveCalls = prog.task_calls || 0;
@@ -867,7 +867,7 @@ function renderLogs(p){
   // Check if agent is currently working (for typing indicator)
   const agentInfo=(data.agents||{})[sel]||{};
   const isWorking=agentInfo.pipeline==='working';
-  const statusDot=isWorking?'dot-working':agentInfo.pipeline==='idle'?'dot-idle':agentInfo.pipeline==='booting'?'dot-booting':'dot-offline';
+  const statusDot=isWorking?'dot-working':agentInfo.pipeline==='idle'?'dot-idle':agentInfo.pipeline==='booting'?'dot-booting':agentInfo.status==='stopped'?'dot-stopped':'dot-offline';
   const progDetail=agentInfo.progress?.detail||'';
   const progEvent=agentInfo.progress?.event||'';
   const LOG_VISIBLE = 200;

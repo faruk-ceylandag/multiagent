@@ -230,6 +230,16 @@ def ensure_mcp(ctx, needed_names):
         from ecosystem.mcp.setup_mcp import MCP_SERVERS
     except ImportError:
         return
+    # For OAuth servers pending auth, notify hub instead of silently skipping
+    auth_cache_path = os.path.expanduser("~/.claude/mcp-needs-auth-cache.json")
+    auth_cache = {}
+    if os.path.exists(auth_cache_path):
+        try:
+            with open(auth_cache_path) as f:
+                auth_cache = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+
     installed_any = False
     for name in needed_names:
         if name in available:
@@ -238,6 +248,16 @@ def ensure_mcp(ctx, needed_names):
         if not spec:
             continue
         if not spec.get("command") and not spec.get("url"):
+            continue
+
+        # Check if this is an OAuth server stuck in pending auth
+        if spec.get("type") in ("http", "sse") and name in auth_cache:
+            log(ctx, f"\u26a0 MCP {name}: OAuth pending — needs browser authentication")
+            try:
+                from .hub_client import hub_post
+                hub_post(ctx, "/services/oauth_needed", {"mcp_name": name, "agent": ctx.AGENT_NAME})
+            except Exception:
+                pass
             continue
 
         # Resolve env vars with aliases and derivations
@@ -519,6 +539,20 @@ def check_mcp_health(ctx, needed_names, timeout=3):
             # No spec or unknown type — assume healthy (stdio servers are local)
             healthy.add(name)
     return healthy
+
+
+def check_oauth_pending():
+    """Return list of OAuth MCP servers that need browser authentication."""
+    cache_path = os.path.expanduser("~/.claude/mcp-needs-auth-cache.json")
+    if not os.path.exists(cache_path):
+        return []
+    try:
+        from ecosystem.mcp.setup_mcp import MCP_SERVERS
+        with open(cache_path) as f:
+            cache = json.load(f)
+        return [k for k in cache if k in MCP_SERVERS and MCP_SERVERS[k].get("type") in ("http", "sse")]
+    except Exception:
+        return []
 
 
 def start_mcp_watcher(ctx):

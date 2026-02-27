@@ -546,21 +546,43 @@ def get_agent_profiles():
 
 @router.get("/mcp/status")
 def get_mcp_status():
-    """Return MCP server status per agent."""
+    """Return MCP server status per agent.
+    Reads from agent session .mcp.json AND ~/.claude.json (user-level)
+    so HTTP/SSE servers (atlassian, figma, sentry) registered at user scope are visible."""
+    # Collect user-level MCP servers from ~/.claude.json (shared across all agents)
+    user_servers = {}
+    user_claude_json = os.path.expanduser("~/.claude.json")
+    if os.path.exists(user_claude_json):
+        try:
+            with open(user_claude_json) as f:
+                user_data = json.load(f)
+            for srv_name, srv in user_data.get("mcpServers", {}).items():
+                user_servers[srv_name] = {"name": srv_name, "type": srv.get("type", ""),
+                                          "has_env": bool(srv.get("env")), "scope": "user"}
+        except Exception:
+            pass
+
     result = {}
     for name in ALL_AGENTS:
+        seen = set()
+        servers = []
+        # Agent-level .mcp.json (stdio servers with credentials)
         session_dir = os.path.join(MA_DIR, "sessions", name) if MA_DIR else ""
         mcp_file = os.path.join(session_dir, ".mcp.json") if session_dir else ""
-        servers = []
         if mcp_file and os.path.exists(mcp_file):
             try:
                 with open(mcp_file) as f:
                     mcp_data = json.load(f)
                 for srv_name, srv in mcp_data.get("mcpServers", {}).items():
                     servers.append({"name": srv_name, "type": srv.get("type", ""),
-                                   "has_env": bool(srv.get("env"))})
+                                   "has_env": bool(srv.get("env")), "scope": "agent"})
+                    seen.add(srv_name)
             except Exception:
                 pass
+        # Merge user-level servers not already in agent-level
+        for srv_name, srv_info in user_servers.items():
+            if srv_name not in seen:
+                servers.append(srv_info)
         result[name] = servers
     return result
 

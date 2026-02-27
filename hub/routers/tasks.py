@@ -206,13 +206,20 @@ def update_task(tid: int, data: dict):
                 if file_locks[path].get("task_id") == tid:
                     del file_locks[path]
 
-        # Cancel active review subtasks and clean up when parent is cancelled/failed
+        # Cancel active review/QA subtasks and clean up when parent is cancelled/failed
         if new_status in ("cancelled", "failed") and old_status != new_status:
             for sub_id in tasks[tid].get("_review_subtask_ids", []):
                 sub = tasks.get(sub_id)
                 if sub and sub.get("status") not in ("done", "failed", "cancelled"):
                     sub["status"] = "cancelled"
                     sub["completed_at"] = datetime.now().isoformat()
+            # Also cancel QA subtask
+            qa_sub_id = tasks[tid].get("_qa_subtask_id")
+            if qa_sub_id:
+                qa_sub = tasks.get(qa_sub_id)
+                if qa_sub and qa_sub.get("status") not in ("done", "failed", "cancelled"):
+                    qa_sub["status"] = "cancelled"
+                    qa_sub["completed_at"] = datetime.now().isoformat()
             # Immediately clean comments/reviews for cancelled tasks
             if new_status == "cancelled":
                 tid_str = str(tid)
@@ -257,8 +264,45 @@ def update_task(tid: int, data: dict):
         elif new_status == "done" and old_status != "done":
             _auto_notify_dependents(tid)
             _check_plan_parent_completion(tid)
+            # QA subtask done → auto-transition parent to uat/done
+            if tasks[tid].get("_is_qa_subtask"):
+                parent_tid = tasks[tid].get("_review_parent_id")
+                parent = tasks.get(parent_tid)
+                if parent and parent.get("status") == "in_testing":
+                    if _cfg.get("auto_uat", False):
+                        parent["status"] = "done"
+                        parent["completed_at"] = datetime.now().isoformat()
+                        analytics_log.append({
+                            "task_id": parent_tid, "agent": parent.get("assigned_to", ""),
+                            "status": "done", "started": parent.get("started_at", ""),
+                            "completed": parent["completed_at"],
+                        })
+                        messages.setdefault("user", []).append({
+                            "sender": "system", "receiver": "user",
+                            "content": f"✅ Task #{parent_tid} QA passed → auto-UAT approved → done.",
+                            "msg_type": "info", "timestamp": datetime.now().isoformat(),
+                        })
+                        add_activity("system", parent.get("assigned_to", "?"), "auto_uat",
+                                     f"Task #{parent_tid} auto-UAT approved (QA subtask #{tid} done)")
+                        _auto_notify_dependents(parent_tid)
+                    else:
+                        parent["status"] = "uat"
+                        parent["_uat_entered_at"] = datetime.now().isoformat()
+                        messages.setdefault("user", []).append({
+                            "sender": "system", "receiver": "user",
+                            "content": f"✅ Task #{parent_tid} QA passed (subtask #{tid} done). Moved to UAT.",
+                            "msg_type": "info", "timestamp": datetime.now().isoformat(),
+                        })
+                    bump_version()
         elif new_status == "failed" and old_status != "failed":
             _auto_notify_blocker(tid)
+            # QA subtask failed → trigger parent rework cycle
+            if tasks[tid].get("_is_qa_subtask"):
+                parent_tid = tasks[tid].get("_review_parent_id")
+                parent = tasks.get(parent_tid)
+                if parent and parent.get("status") == "in_testing":
+                    detail = tasks[tid].get("error_message", "") or data.get("detail", "")
+                    _handle_qa_failure(parent_tid, "in_testing", detail=detail)
             # Failure escalation
             _failure_count = tasks[tid].get("_failure_count", 0) + 1
             tasks[tid]["_failure_count"] = _failure_count
@@ -1040,6 +1084,14 @@ def submit_review(tid: int, data: dict):
         # Reject stale verdicts — task must be in code_review to accept reviews (checked under lock)
         if tasks[tid].get("status") != "code_review":
             return {"status": "error", "message": f"Task not in code_review (current: {tasks[tid].get('status')})"}
+        # Validate agent is an assigned reviewer for this task
+        assigned_reviewers = set()
+        for sub_id in tasks[tid].get("_review_subtask_ids", []):
+            sub = tasks.get(sub_id)
+            if sub:
+                assigned_reviewers.add(sub.get("assigned_to", ""))
+        if assigned_reviewers and agent not in assigned_reviewers:
+            return {"status": "error", "message": f"Agent '{agent}' is not an assigned reviewer for this task"}
         # Store verdict
         task_reviews.setdefault(tid_str, {})[agent] = {
             "verdict": verdict,

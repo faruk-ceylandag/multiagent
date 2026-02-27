@@ -604,6 +604,13 @@ while True:
                     log(ctx, "▶ Resumed by user")
                     with ctx._stop_lock:
                         ctx._should_stop = False
+                    # Drain stale messages accumulated while stopped
+                    try:
+                        stale = hub_get(ctx, f"/messages/{ctx.AGENT_NAME}")
+                        if stale and isinstance(stale, list) and len(stale) > 0:
+                            log(ctx, f"🗑 Drained {len(stale)} stale messages from stop period")
+                    except Exception:
+                        pass
                     set_status(ctx, "idle", "resumed")
                     break
                 if resp.get("stop"):

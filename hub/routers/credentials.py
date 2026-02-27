@@ -1,12 +1,15 @@
-"""Credential management, service connect, and notification config routes."""
+"""Credential management, service connect, OAuth, and notification config routes."""
 
-import os, json
+import os
+import json
+import subprocess
 from datetime import datetime
 from fastapi import APIRouter
 
 from hub.state import (
     lock, logger, MA_DIR, ALL_AGENTS, messages, creds_file,
     notification_config, send_notification, add_activity, SERVICE_REGISTRY,
+    bump_version,
 )
 
 router = APIRouter(tags=["credentials"])
@@ -140,6 +143,81 @@ def get_services():
         entry = {**svc, "connected": connected, "auth_type": auth_type}
         services.append(entry)
     return {"services": services}
+
+# ── OAuth ──
+@router.post("/services/oauth_needed")
+def report_oauth_needed(data: dict):
+    """Agent reports that an OAuth MCP needs authentication."""
+    mcp_name = data.get("mcp_name", "")
+    agent = data.get("agent", "")
+    if not mcp_name:
+        return {"status": "error"}
+    with lock:
+        import hub.state as _st
+        _st.pending_oauth[mcp_name] = {
+            "reported_by": agent,
+            "reported_at": datetime.now().isoformat(),
+        }
+        bump_version()
+    add_activity(agent, "system", "mcp_auth", f"OAuth needed: {mcp_name}")
+    return {"status": "ok"}
+
+@router.get("/services/oauth_pending")
+def get_oauth_pending():
+    """Return list of MCPs with pending OAuth."""
+    # Check auth cache directly
+    cache_path = os.path.expanduser("~/.claude/mcp-needs-auth-cache.json")
+    cache = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                cache = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+    mcp_names = {s.get("mcp", s["id"]) for s in SERVICE_REGISTRY}
+    return {"pending": {k: v for k, v in cache.items() if k in mcp_names}}
+
+@router.post("/services/{svc_id}/oauth")
+def trigger_oauth(svc_id: str):
+    """Clear OAuth cache for a service and return CLI command for manual auth."""
+    svc = next((s for s in SERVICE_REGISTRY if s["id"] == svc_id), None)
+    if not svc:
+        return {"status": "error", "message": "Unknown service"}
+    mcp_name = svc.get("mcp", svc_id)
+    # Clear from auth cache
+    cache_path = os.path.expanduser("~/.claude/mcp-needs-auth-cache.json")
+    cleared = False
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                cache = json.load(f)
+            if mcp_name in cache:
+                del cache[mcp_name]
+                with open(cache_path, "w") as f:
+                    json.dump(cache, f)
+                cleared = True
+        except (OSError, json.JSONDecodeError):
+            pass
+    # Remove + re-add MCP to trigger OAuth on next use
+    mcp_cmd = svc.get("mcp_cmd", "")
+    try:
+        subprocess.run(["claude", "mcp", "remove", "--scope", "user", mcp_name],
+                       capture_output=True, timeout=10)
+        if mcp_cmd:
+            subprocess.run(mcp_cmd, shell=True, capture_output=True, timeout=30)
+    except Exception:
+        pass
+    # Clear from pending_oauth state
+    with lock:
+        import hub.state as _st
+        _st.pending_oauth.pop(mcp_name, None)
+        bump_version()
+    return {
+        "status": "ok",
+        "cleared": cleared,
+        "message": f"Cache cleared for {mcp_name}. Run this command in your terminal to complete OAuth:",
+        "command": mcp_cmd,
+    }
 
 # ── Notifications ──
 @router.post("/notifications/config")

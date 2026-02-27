@@ -317,25 +317,19 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                     cmd.extend(["--add-dir", d])
 
             # ── Session continuity ──
-            # --session-id requires --continue or --resume (Claude CLI constraint)
+            # Use --resume <id> directly; avoid --session-id which requires --fork-session
             _task_sid = None
             if ctx.current_task_id:
                 _task_sid = ctx.get_task_session(ctx.current_task_id)
 
             if continue_session and ctx.valid_sid(ctx.SESSION_ID):
                 # --continue resumes last conversation without re-sending context
-                if _task_sid:
-                    cmd.extend(["--session-id", _task_sid])
                 cmd.extend(["--continue", "-p", prompt])
-            elif ctx.valid_sid(ctx.SESSION_ID):
-                if _task_sid:
-                    cmd.extend(["--session-id", _task_sid])
-                cmd.extend(["--resume", ctx.SESSION_ID])
-                cmd.extend(["-p", prompt])
             elif _task_sid:
-                # New task session — try resuming the deterministic session
-                cmd.extend(["--resume", _task_sid])
-                cmd.extend(["-p", prompt])
+                # Resume the deterministic task session
+                cmd.extend(["--resume", _task_sid, "-p", prompt])
+            elif ctx.valid_sid(ctx.SESSION_ID):
+                cmd.extend(["--resume", ctx.SESSION_ID, "-p", prompt])
             else:
                 cmd.extend(["-p", prompt])
 

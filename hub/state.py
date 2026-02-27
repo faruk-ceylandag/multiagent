@@ -1143,6 +1143,14 @@ def _review_timeout_timer():
                         started_time = datetime.fromisoformat(started)
                         if (now - started_time).total_seconds() > 1200:  # 20 min
                             task.pop("_testing_started_at", None)
+                            # Cancel orphaned QA subtask before transitioning parent
+                            qa_sub_id = task.get("_qa_subtask_id")
+                            if qa_sub_id and qa_sub_id in tasks:
+                                qa_sub = tasks[qa_sub_id]
+                                if qa_sub.get("status") not in ("done", "failed", "cancelled"):
+                                    qa_sub["status"] = "cancelled"
+                                    qa_sub["completed_at"] = now.isoformat()
+                                    logger.info(f"QA subtask #{qa_sub_id} cancelled (parent #{tid} QA timeout)")
                             if _cfg.get("auto_uat", False):
                                 task["status"] = "done"
                                 task["completed_at"] = now.isoformat()
