@@ -794,7 +794,12 @@ while True:
                 continue
 
         # Chat messages when idle → quick response via existing session
-        if is_chat_only and not is_task:
+        # Skip chat shortcut if agent has an active task — treat as task follow-up instead
+        _has_active_task = False
+        if ctx.current_task_id:
+            _atd = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
+            _has_active_task = _atd and isinstance(_atd, dict) and _atd.get("status") in ("in_progress", "to_do")
+        if is_chat_only and not is_task and not _has_active_task:
             chat_content = " ".join(m.get("content", "") for m in msgs if m.get("msg_type") == "chat")
             if chat_content.strip():
                 set_status(ctx, "working", "💬 chat")
@@ -810,6 +815,13 @@ while True:
                     hub_msg(ctx, "user", "Message received, an error occurred.", "chat")
                 set_status(ctx, "idle")
                 continue
+
+        # Save previous task context for follow-up detection
+        _prev_task_id = ctx.current_task_id
+        _prev_project = ctx.current_project
+        _prev_task_calls = ctx.task_calls
+        _prev_session_tokens = ctx.session_tokens
+        _prev_task_start = ctx._task_start_time
 
         ctx.current_task_id = None
         ctx.current_project = None
@@ -833,6 +845,23 @@ while True:
             if tid_match:
                 ctx.current_task_id = tid_match.group(1)
                 break
+
+        # Follow-up detection: if no task_id in messages but agent was recently
+        # working on a task, treat as continuation (e.g., user answering "yes"
+        # after architect asked for confirmation, or credential refresh mid-task).
+        # This ensures claude_runner uses get_task_session() to resume the same
+        # Claude CLI session, preserving conversation context.
+        _is_followup = False
+        if not ctx.current_task_id and _prev_task_id:
+            _prev_td = hub_get(ctx, f"/tasks/{_prev_task_id}")
+            if _prev_td and isinstance(_prev_td, dict) and _prev_td.get("status") in ("in_progress", "to_do"):
+                ctx.current_task_id = _prev_task_id
+                ctx.current_project = _prev_project
+                ctx.task_calls = _prev_task_calls
+                ctx.session_tokens = _prev_session_tokens
+                ctx._task_start_time = _prev_task_start
+                _is_followup = True
+                log(ctx, f"🔗 Continuing task #{_prev_task_id} (follow-up)")
 
         # Detect review parent ID from message or task data
         for m in msgs:
@@ -1310,7 +1339,10 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
 {{contracts}}
 {{roster}}
 {{project_ctx}}{{mcp_tools}}
-ACT FAST. Read the task → create a PLAN PROPOSAL immediately. Do NOT explore the codebase. Do NOT read source files. Do NOT analyze architecture. The dev agents will read the code themselves.
+ACT FAST. You have a MAX 5 tool call budget. Read URL (if any) → create plan → done.
+NEVER explore the codebase. NEVER read source files. NEVER use Glob/Grep/Find on code.
+NEVER use EnterPlanMode or ExitPlanMode tools — ONLY use the curl plan_proposal format below.
+The dev agents will read the code themselves.
 
 PLAN PROPOSAL (send ONE curl with ALL steps):
 curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{
@@ -1330,7 +1362,7 @@ RULES:
 3. ALWAYS copy ALL URLs, requirements, file paths into each step description. Agent has ZERO context otherwise.
 4. depends_on_step uses 0-based index within the plan_steps array.
 5. If task mentions a specific agent ("frontend fix X"), single step plan to that agent. Zero analysis.
-6. If task has a URL (Figma/Jira/GitHub) → TRY the matching MCP tool to read it. If MCP fails, include the raw URL + [USE X MCP] prefix in the step description.
+6. URL in task? Read it via MCP (1-2 calls max). Extract key info + external ID. If MCP fails, include raw URL + [USE X MCP] prefix.
 6b. ALWAYS extract external task ID from URLs: Jira→"PA-123", GitHub→"GH-42", Linear→"PRJ-55". Put it in EVERY step's task_external_id field. This is used for branch names and commit messages.
 6c. NO external ID? Leave task_external_id EMPTY — agent will continue on current branch. Do NOT invent branch names or use TASK-{id}.
 7. NEVER write code, edit files, or implement anything. ONLY plan.
@@ -1338,15 +1370,9 @@ RULES:
 9. The user will review & approve the plan before tasks are created.
 10. ALWAYS add a QA step (depends_on the dev step) for verification. System auto-iterates if QA fails.
 
-MCP CONTENT CACHING — MANDATORY for ANY MCP content you read:
-After reading ANY MCP content (Figma design, Jira ticket, GitHub issue, etc.), IMMEDIATELY cache it:
-curl -s -X POST {{hub}}/cache -H 'Content-Type: application/json' -d '{"key":"SOURCE_KEYNAME","content":"FULL CONTENT HERE","source":"figma|jira|github|sentry|google","description":"Brief description"}'
-Examples:
-  - Figma: key="figma_FILEKEY_NODEID", source="figma"
-  - Jira: key="jira_PA-123", source="jira"
-  - GitHub: key="github_owner_repo_issue_42", source="github"
-Then reference the cache in step descriptions: [CACHED:key_name] — agents will read from cache instead of re-fetching.
-This saves tokens and avoids redundant MCP calls. Cache ALL content: designs, requirements, screenshots, acceptance criteria.
+MCP CONTENT CACHING — after reading MCP content, cache it so agents don't re-fetch:
+curl -s -X POST {{hub}}/cache -H 'Content-Type: application/json' -d '{"key":"SOURCE_KEYNAME","content":"CONTENT","source":"figma|jira|github|sentry|google","description":"Brief desc"}'
+Then reference in step descriptions: [CACHED:key_name]
 {{branch_info}}{{hints}}""")
         else:
             task_tpl = load_template(ctx, "task", """You are {{agent}}.{{role_ctx}}
