@@ -1,6 +1,11 @@
 """hub/state.py — Shared state, models, persistence, config, and utility functions."""
 
-import os, json, time, logging, threading, re, subprocess, shutil
+import os
+import json
+import time
+import logging
+import threading
+import subprocess
 from datetime import datetime, timedelta
 from typing import Dict, List
 from collections import deque
@@ -98,6 +103,7 @@ agent_progress: Dict[str, dict] = {}
 workspace_registry: Dict[str, dict] = {}  # {ws_id: {path, name, projects, stacks, added_at, active}}
 test_results: List[dict] = []
 agent_specialization: Dict[str, dict] = {}
+pending_oauth: Dict[str, dict] = {}  # {mcp_name: {reported_by, reported_at}} — transient, recalculated from auth cache
 agent_learnings: List[dict] = []
 agent_roles: Dict[str, str] = {}  # {agent_name: role_description}
 file_plans: Dict[str, dict] = {}  # {agent_name: {task_id, files, timestamp}} — transient, no persistence
@@ -679,7 +685,6 @@ def reset_session():
         # Clear MCP cache (stale Jira/Figma/GitHub content from old sessions)
         cache_registry.clear()
         if CACHE_DIR:
-            import shutil
             for f in os.listdir(CACHE_DIR):
                 fp = os.path.join(CACHE_DIR, f)
                 try:

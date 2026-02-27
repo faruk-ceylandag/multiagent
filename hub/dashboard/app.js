@@ -1924,12 +1924,23 @@ async function renderAnalytics(p){
       const connected=svcs.filter(s=>s.connected);
       const available=svcs.filter(s=>!s.connected);
       let html='';
+      // OAuth alert banner for pending authentications
+      const pendingOAuth=svcs.filter(s=>s.auth_type==='oauth_pending');
+      if(pendingOAuth.length>0){
+        html+=`<div style="background:var(--yellow-bg,#3d3520);border:1px solid var(--yellow,#e5c07b);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px">
+          <span style="font-size:18px">\u26a0\ufe0f</span>
+          <div style="flex:1">
+            <div style="font-size:12px;font-weight:600;color:var(--yellow,#e5c07b)">OAuth Authentication Required</div>
+            <div style="font-size:11px;color:var(--fg2);margin-top:2px">${pendingOAuth.map(s=>esc(s.name)).join(', ')} need browser authentication</div>
+          </div>
+        </div>`;
+      }
       if(connected.length){
         html+=connected.map(s=>`<div class="flex-center gap-8 py-4">
           <span style="font-size:14px">${s.icon}</span>
           <span class="text-green font-bold">${esc(s.name)}</span>
           <span class="text-sm ${s.auth_type==='oauth_pending'?'text-yellow':'text-green'}">${s.auth_type==='oauth_pending'?'⚠ Auth Pending':'● Connected'}</span>
-          ${s.auth_type==='oauth_pending'?`<button class="btn-sm task-start ml-auto" onclick="showServiceWizard('${escAttr(s.id)}')">Authenticate</button>`:`<button class="btn-sm task-cancel ml-auto" onclick="disconnectService('${escAttr(s.id)}')">Disconnect</button>`}
+          ${s.auth_type==='oauth_pending'?`<button class="btn-sm task-start ml-auto" onclick="triggerOAuth('${escAttr(s.id)}')">Authenticate</button>`:`<button class="btn-sm task-cancel ml-auto" onclick="disconnectService('${escAttr(s.id)}')">Disconnect</button>`}
         </div>`).join('');
       }
       if(available.length){
@@ -1975,6 +1986,31 @@ async function delCred(key){
   if(!confirm('Delete credential: '+key+'?'))return;
   await fetch(HUB+'/credentials/'+encodeURIComponent(key),{method:'DELETE'});
   notify('Deleted: '+key);renderPanel();
+}
+
+async function triggerOAuth(svcId){
+  const r=await(await fetch(HUB+'/services/'+encodeURIComponent(svcId)+'/oauth',{
+    method:'POST',headers:{'Content-Type':'application/json'}
+  })).json();
+  if(r.status==='ok'){
+    const overlay=document.createElement('div');
+    overlay.className='modal-overlay';
+    const cmd=esc(r.command||'');
+    overlay.innerHTML=`<div class="modal-box" style="width:440px">
+      <h3 style="margin-bottom:8px;font-size:15px">\u{1f510} Complete OAuth Authentication</h3>
+      <p style="font-size:11px;color:var(--fg2);margin-bottom:12px">Cache cleared. Run this command in your terminal to complete OAuth:</p>
+      <div style="background:var(--bg2,#1a1a2e);border:1px solid var(--border);border-radius:6px;padding:10px;font-family:monospace;font-size:11px;color:var(--cyan,#88c0d0);cursor:pointer;margin-bottom:12px;word-break:break-all" onclick="navigator.clipboard.writeText(${JSON.stringify(r.command||'')});this.querySelector('.copy-hint').textContent='Copied!';setTimeout(()=>this.querySelector('.copy-hint').textContent='Click to copy',1500)">
+        ${cmd}
+        <span class="copy-hint" style="float:right;font-size:9px;color:var(--fg3);font-family:system-ui">Click to copy</span>
+      </div>
+      <p style="font-size:10px;color:var(--fg3)">After authenticating, agents will automatically detect the new credentials.</p>
+      <div class="modal-actions">
+        <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Close</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+  }
+  renderPanel();
 }
 
 async function disconnectService(svcId){
