@@ -6,7 +6,7 @@ import threading
 import time
 import re
 import random
-from .log_utils import log, humanize_bash, short_path, flush_logs
+from .log_utils import log, humanize_bash, short_path, flush_logs, humanize_mcp_tool, is_noise_tool, format_tokens_comma
 from .hub_client import hub_post, hub_msg, report_progress, update_session
 from .credentials import load_credentials
 from .git_ops import collect_changes, lock_file
@@ -271,7 +271,6 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                 # Block: Glob, Grep, Task, WebFetch, WebSearch, AskUserQuestion, EnterPlanMode
                 cmd.extend(["--allowedTools", "Read,Bash(curl*),Bash(jq*),Bash(cat*),mcp__*"])
                 cmd.extend(["--disallowedTools", "Glob,Grep,Task,WebFetch,WebSearch,AskUserQuestion,EnterPlanMode,ExitPlanMode"])
-                cmd.extend(["--permission-mode", "plan"])
             else:
                 cmd.extend(["--allowedTools", "Edit,Write,Read,Bash(*),mcp__*"])
 
@@ -287,7 +286,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
             # ── Effort level: lower effort for simple tasks saves tokens ──
             role = getattr(ctx, "AGENT_ROLE", "")
             tier = classify_prompt(prompt, role=role)
-            if tier == "haiku":
+            if tier == "haiku" and ctx.AGENT_NAME != "architect":
                 cmd.extend(["--effort", "low"])
             elif tier == "sonnet" and "opus" not in model:
                 cmd.extend(["--effort", "medium"])
@@ -442,46 +441,56 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
 
                             elif btype == "tool_use":
                                 tool_name = b.get("name", "?")
-                                tool_count += 1
                                 inp = b.get("input") or {}
                                 if not isinstance(inp, dict):
                                     inp = {}
-                                detail = ""
-                                if tool_name == "Bash" and inp.get("command"):
-                                    detail = humanize_bash(inp["command"])
-                                elif tool_name in ("Read", "View") and inp.get("file_path"):
-                                    detail = short_path(inp["file_path"])
-                                elif tool_name in ("Edit", "Write") and inp.get("file_path"):
-                                    detail = short_path(inp["file_path"])
-                                elif tool_name == "WebFetch" and inp.get("url"):
-                                    detail = inp["url"][:120]
-                                elif tool_name == "Task" and inp.get("description"):
-                                    detail = inp["description"][:100]
-                                elif tool_name == "Skill" and inp.get("name"):
-                                    detail = inp["name"]
-                                elif inp:
-                                    for v in inp.values():
-                                        if isinstance(v, str) and len(v) > 2:
-                                            detail = v[:100]
-                                            break
-                                if detail and detail.startswith("→"):
-                                    log(ctx, f"  📡 {detail[2:]}")
-                                    report_progress(ctx, "hub_call", detail[2:])
+                                # Skip noise tools (ToolSearch etc.)
+                                if is_noise_tool(tool_name):
+                                    pass  # Don't count or log
                                 else:
-                                    log(ctx, f"  🔧 {tool_name}: {detail}" if detail else f"  🔧 {tool_name}")
-                                    report_progress(ctx, "tool_use", f"{tool_name}: {detail}" if detail else tool_name)
-                                # Report tool event to hub for live dashboard
-                                try:
-                                    detail_str = detail or tool_name
-                                    hub_post(ctx, "/agents/tool_event", {
-                                        "agent_name": ctx.AGENT_NAME,
-                                        "event": {"type": "tool_use", "tool": tool_name, "detail": detail_str[:100], "timestamp": time.time()}
-                                    })
-                                except Exception:
-                                    pass
-                                if tool_name in ("Edit", "Write") and inp.get("file_path"):
-                                    lock_file(ctx, inp["file_path"])
-                                track_ecosystem_use(ctx, tool_name, inp)
+                                    tool_count += 1
+                                    detail = ""
+                                    is_mcp = tool_name.startswith("mcp__")
+                                    if is_mcp:
+                                        display, detail, category = humanize_mcp_tool(tool_name, inp)
+                                    elif tool_name == "Bash" and inp.get("command"):
+                                        detail = humanize_bash(inp["command"])
+                                    elif tool_name in ("Read", "View") and inp.get("file_path"):
+                                        detail = short_path(inp["file_path"])
+                                    elif tool_name in ("Edit", "Write") and inp.get("file_path"):
+                                        detail = short_path(inp["file_path"])
+                                    elif tool_name == "WebFetch" and inp.get("url"):
+                                        detail = inp["url"][:120]
+                                    elif tool_name == "Task" and inp.get("description"):
+                                        detail = inp["description"][:100]
+                                    elif tool_name == "Skill" and inp.get("name"):
+                                        detail = inp["name"]
+                                    elif inp:
+                                        for v in inp.values():
+                                            if isinstance(v, str) and len(v) > 2:
+                                                detail = v[:100]
+                                                break
+                                    if detail and detail.startswith("→"):
+                                        log(ctx, f"  📡 {detail[2:]}")
+                                        report_progress(ctx, "hub_call", detail[2:])
+                                    elif is_mcp:
+                                        log(ctx, f"  🔧 [{category}] {display} -- {detail}" if detail else f"  🔧 [{category}] {display}")
+                                        report_progress(ctx, "tool_use", f"[{category}] {display}: {detail}" if detail else f"[{category}] {display}")
+                                    else:
+                                        log(ctx, f"  🔧 {tool_name}: {detail}" if detail else f"  🔧 {tool_name}")
+                                        report_progress(ctx, "tool_use", f"{tool_name}: {detail}" if detail else tool_name)
+                                    # Report tool event to hub for live dashboard
+                                    try:
+                                        detail_str = detail or tool_name
+                                        hub_post(ctx, "/agents/tool_event", {
+                                            "agent_name": ctx.AGENT_NAME,
+                                            "event": {"type": "tool_use", "tool": tool_name, "detail": detail_str[:100], "timestamp": time.time()}
+                                        })
+                                    except Exception:
+                                        pass
+                                    if tool_name in ("Edit", "Write") and inp.get("file_path"):
+                                        lock_file(ctx, inp["file_path"])
+                                    track_ecosystem_use(ctx, tool_name, inp)
 
                     elif tt == "result":
                         # Claude CLI stream-json: usage/session_id are at event top level
@@ -491,7 +500,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                             save_session(ctx)
                         usage = evt.get("usage") or {}
                         if isinstance(usage, dict) and usage:
-                            log(ctx, f"  tokens: {usage.get('input_tokens', 0)}in/{usage.get('output_tokens', 0)}out [{model_tag}]")
+                            log(ctx, f"  tokens: {format_tokens_comma(usage.get('input_tokens', 0))} in / {format_tokens_comma(usage.get('output_tokens', 0))} out [{model_tag}]")
                             report_usage(ctx, usage, model)
                             report_progress(ctx, "call_done", f"{tool_count} tools, {usage.get('output_tokens', 0)} out")
                         elif evt.get("cost_usd"):

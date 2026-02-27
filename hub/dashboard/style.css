@@ -115,6 +115,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .log-area .tool .tool-badge-web { background:rgba(139,92,246,0.15); color:var(--ac); }
 .log-area .tool .tool-badge-task { background:rgba(57,211,83,0.15); color:var(--cyan); }
 .log-area .tool .tool-badge-default { background:rgba(139,148,158,0.15); color:var(--fg2); }
+/* MCP service badges */
+.log-area .tool .tool-badge-jira { background:rgba(0,82,204,0.18); color:#4c9aff; }
+.log-area .tool .tool-badge-confluence { background:rgba(0,82,204,0.12); color:#6bb0ff; }
+.log-area .tool .tool-badge-github { background:rgba(168,85,247,0.18); color:#c084fc; }
+.log-area .tool .tool-badge-figma { background:rgba(162,28,175,0.18); color:#e879f9; }
+.log-area .tool .tool-badge-google { background:rgba(66,133,244,0.18); color:#93bbfc; }
+.log-area .tool .tool-badge-sentry { background:rgba(210,153,34,0.18); color:#f0b429; }
+.log-area .tool .tool-badge-context7 { background:rgba(63,185,80,0.18); color:var(--green); }
+.log-area .tool .tool-badge-playwright { background:rgba(234,89,12,0.18); color:#fb923c; }
+.log-area .tool .tool-badge-thinking { background:rgba(139,92,246,0.12); color:var(--ac); }
+/* Markdown inline styles in text-stream */
+.log-area .text-stream strong { font-weight:700; color:var(--fg); }
+.log-area .text-stream em { font-style:italic; color:var(--fg2); }
+.log-area .text-stream .md-code { background:rgba(139,148,158,0.15); padding:1px 4px; border-radius:3px; font-size:10px; color:var(--cyan); }
+.log-area .text-stream .md-link { color:var(--blue); text-decoration:underline; text-underline-offset:2px; }
+.log-area .text-stream .md-link:hover { color:var(--ac); }
+/* Token display */
+.log-area .tok-in { color:var(--cyan); font-size:9px; margin-right:4px; }
+.log-area .tok-out { color:var(--yellow); font-size:9px; margin-right:6px; }
+/* Dedup badge */
+.dedup-badge { display:inline-block; font-size:8px; background:rgba(139,148,158,0.2); color:var(--fg2); padding:1px 5px; border-radius:8px; margin-left:6px; font-weight:600; vertical-align:middle; }
 .log-area .error { color:var(--red); }
 .log-area .ok { color:var(--green); }
 .log-area .text-stream { color:var(--fg); opacity:0.92; padding:3px 0 3px 10px; border-left:2px solid var(--blue); margin:3px 0; display:block; line-height:1.55; }
@@ -459,16 +480,25 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 
 /* ── Chat Bubbles ── */
 .chat-thread { display:flex; flex-direction:column; gap:6px; padding:8px 0; border-bottom:1px solid var(--border); }
-.chat-bubble { max-width:80%; padding:8px 12px; border-radius:12px; font-size:12px; line-height:1.5; word-wrap:break-word; word-break:break-word; white-space:pre-wrap; position:relative; }
-.chat-bubble-user { align-self:flex-end; background:var(--ac); color:#fff; border-bottom-right-radius:4px; }
-.chat-bubble-agent { align-self:flex-start; background:var(--bg3); color:var(--fg); border-bottom-left-radius:4px; }
+.chat-bubble { max-width:80%; padding:8px 12px; border-radius:12px; font-size:12px; line-height:1.5; word-wrap:break-word; word-break:break-word; position:relative; }
+.chat-bubble-user { align-self:flex-end; background:var(--ac); color:#fff; border-bottom-right-radius:4px; white-space:pre-wrap; }
+.chat-bubble-agent { align-self:flex-start; background:var(--bg3); color:var(--fg); border-bottom-left-radius:4px; border-left:2px solid var(--ac); max-width:85%; white-space:pre-wrap; }
 .chat-bubble .bubble-meta { font-size:9px; opacity:0.6; margin-top:4px; }
 .chat-bubble-user .bubble-meta { text-align:right; }
-.chat-bubble .bubble-type { font-size:9px; padding:1px 4px; border-radius:3px; background:rgba(255,255,255,0.15); margin-right:4px; }
+.chat-bubble .bubble-type { font-size:9px; padding:1px 4px; border-radius:3px; background:rgba(255,255,255,0.15); margin-right:6px; }
 .chat-bubble-agent .bubble-type { background:var(--bg); }
 .chat-bubble .bubble-toggle { display:inline; color:inherit; opacity:0.7; cursor:pointer; background:none; border:none; font-size:10px; padding:0; }
 .chat-bubble .bubble-toggle:hover { opacity:1; text-decoration:underline; }
 .chat-bubble .bubble-actions { margin-top:6px; display:flex; gap:4px; }
+/* Markdown in agent chat bubbles */
+.chat-bubble-agent strong { font-weight:700; }
+.chat-bubble-agent em { font-style:italic; opacity:0.85; }
+.chat-bubble-agent .md-code { background:rgba(0,0,0,0.2); padding:1px 4px; border-radius:3px; font-size:11px; font-family:'SF Mono',Consolas,monospace; }
+.chat-bubble-agent .md-link { color:var(--blue); text-decoration:underline; text-underline-offset:2px; }
+.chat-bubble-agent .md-link:hover { color:var(--cyan); }
+/* User bubble links */
+.chat-bubble-user .bubble-link { color:#fff; text-decoration:underline; text-underline-offset:2px; opacity:0.9; word-break:break-all; }
+.chat-bubble-user .bubble-link:hover { opacity:1; }
 
 /* ── Plan Proposal ── */
 .plan-proposal-bubble { max-width:94% !important; width:94%; padding:0 !important; overflow:hidden; border:1px solid color-mix(in srgb, var(--ac) 30%, var(--border)); border-radius:10px; }

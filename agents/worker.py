@@ -519,6 +519,24 @@ def _load_creds_env(ctx):
     return load_credentials(ctx)
 
 
+def _extract_plan_json(ctx):
+    """Extract plan proposal JSON from architect's output lines."""
+    text = "\n".join(ctx._last_output_lines)
+    for pattern in [
+        r"-d\s*'(\{.*?plan_steps.*?\})'",   # curl -d '{...}'
+        r'(\{"sender".*?"plan_steps".*?\})',  # raw JSON
+    ]:
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(1))
+                if "plan_steps" in data and data.get("msg_type") == "plan_proposal":
+                    return data
+            except (json.JSONDecodeError, IndexError):
+                continue
+    return None
+
+
 def _detect_needed_mcps(task_text):
     """Detect which MCP servers are needed based on URLs/keywords in task text."""
     needed = set()
@@ -1450,11 +1468,11 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
 {{contracts}}
 {{roster}}
 {{project_ctx}}
-YOUR ONLY TASK: Output the curl below with the plan. NOTHING ELSE.
+YOUR ONLY TASK: Execute the curl below with the plan using Bash. NOTHING ELSE.
 NEVER ask questions. NEVER ask for confirmation. NEVER say "Would you like me to...".
 NEVER use AskUserQuestion. NEVER use ToolSearch. NEVER read files or explore code.
 If URL content is pre-fetched above, use it. If not, include the raw URL in step descriptions with [USE X MCP] prefix.
-Output ONLY this curl — no text before or after it:
+Execute this curl using Bash — no text before or after it:
 
 curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{
   "sender":"{{agent}}","receiver":"user","msg_type":"plan_proposal",
@@ -1474,7 +1492,7 @@ RULES:
 4. If task mentions a specific agent ("frontend fix X"), single step to that agent.
 5. Use EXTERNAL_ID from pre-fetched content in EVERY step's task_external_id. No ID? Leave empty.
 6. ALWAYS add a QA step (depends_on dev step) for verification.
-7. NEVER ask questions, NEVER explore. Output the curl and STOP.
+7. NEVER ask questions, NEVER explore. Execute the curl and STOP.
 {{branch_info}}{{hints}}""")
         else:
             task_tpl = load_template(ctx, "task", """You are {{agent}}.{{role_ctx}}
@@ -1588,6 +1606,24 @@ RULES:
         task_result = call_claude(ctx, prompt, cwd=task_cwd, json_schema=_call_schema,
                                   system_prompt=_sys_prompt)
         stop_chat_handler(ctx)
+
+        # ── Architect fallback: if plan curl wasn't executed, extract and submit ──
+        if _is_architect and is_task and ctx._last_output_lines:
+            _plan_submitted = False
+            if ctx.current_task_id:
+                try:
+                    _plans = hub_get(ctx, f"/pending-plans?creator={ctx.AGENT_NAME}&task_id={ctx.current_task_id}")
+                    _plan_submitted = bool(_plans and isinstance(_plans, list) and len(_plans) > 0)
+                except Exception:
+                    pass
+            if not _plan_submitted:
+                _plan_json = _extract_plan_json(ctx)
+                if _plan_json:
+                    try:
+                        hub_post(ctx, "/messages", _plan_json)
+                        log(ctx, "📋 Plan proposal submitted (fallback extraction)")
+                    except Exception as e:
+                        log(ctx, f"⚠ Fallback plan submission failed: {e}")
 
         if task_result is False and ctx._task_start_time and ctx.TASK_TIMEOUT > 0 and (time.time() - ctx._task_start_time) > ctx.TASK_TIMEOUT:
             if ctx.current_task_id:

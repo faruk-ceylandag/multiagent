@@ -574,14 +574,29 @@ function appendLogLines(lines){
         open.removeAttribute('open');
         const sm=open.querySelector('summary .call-block-meta');
         if(sm){const tc=body.querySelectorAll('.tool').length;const ok=l.match(/exit=0/);
-          const tokLine=[...body.children].map(c=>c.textContent).find(t=>t.includes('tokens:')&&t.includes('in/'));
-          const tokBit=tokLine?` · ${tokLine.replace(/.*?([\d,]+in\/[\d,]+out).*/,'$1')}`:'';
+          const tokLine=[...body.children].map(c=>c.textContent).find(t=>t.includes('tokens:')&&(t.includes('in /')||t.includes('in/')));
+          const tokBit=tokLine?` · ${tokLine.replace(/.*?tokens:\s*/,'').replace(/\s*\[.*$/,'').trim()}`:'';
           sm.textContent=`${ok?'✓':'✗'} ${tc} tool${tc!==1?'s':''}${tokBit}`;}
       } else {const d=document.createElement('div');d.innerHTML=colorize(l);el.appendChild(d);}
     } else {
-      const open=el.querySelector('details.call-block[open]:last-of-type');
-      if(open){const body=open.querySelector('.call-block-body');const loader=body.querySelector('.call-block-loading');if(loader)loader.remove();const d=document.createElement('div');d.innerHTML=colorize(l);body.appendChild(d);}
-      else{const d=document.createElement('div');d.innerHTML=colorize(l);el.appendChild(d);}
+      // Dedup consecutive identical tool lines
+      const isTool=l.includes('🔧');
+      const toolSig=isTool?l.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/,''):'';
+      if(isTool&&toolSig&&toolSig===_lastToolLine){
+        _lastToolCount++;
+        const container=el.querySelector('details.call-block[open]:last-of-type .call-block-body')||el;
+        const prev=container.lastElementChild;
+        if(prev){
+          let badge=prev.querySelector('.dedup-badge');
+          if(!badge){badge=document.createElement('span');badge.className='dedup-badge';prev.appendChild(badge);}
+          badge.textContent=`×${_lastToolCount+1}`;
+        }
+      } else {
+        if(isTool){_lastToolLine=toolSig;_lastToolCount=0;}else{_lastToolLine='';_lastToolCount=0;}
+        const open=el.querySelector('details.call-block[open]:last-of-type');
+        if(open){const body=open.querySelector('.call-block-body');const loader=body.querySelector('.call-block-loading');if(loader)loader.remove();const d=document.createElement('div');d.innerHTML=colorize(l);body.appendChild(d);}
+        else{const d=document.createElement('div');d.innerHTML=colorize(l);el.appendChild(d);}
+      }
     }
   }
   // Re-add typing indicator if agent is working
@@ -654,7 +669,36 @@ const _reUserPrompt = /^[\s]*📨\s*/;
 const _reCallStart = /▶\s*claude\s*#(\d+)\s*\[(\w+)\]\s*\((\d+)/;
 const _reExitCode = /◼\s*exit=(\d+)/;
 const _reToolUse = /🔧\s*(\w+)(?::?\s*(.*))?$/;
+const _reToolUseMcp = /🔧\s*\[(\w+)\]\s*(.+?)(?:\s*--\s*(.*))?$/;
 const _reTextStream = /^\s*💬\s*/;
+const _reTokens = /tokens:\s*([\d,]+)\s*in\s*\/\s*([\d,]+)\s*out\s*\[(\w+)\]/;
+
+// MCP category → CSS badge class
+const _mcpBadgeMap = {
+  jira:'tool-badge-jira', confluence:'tool-badge-confluence', github:'tool-badge-github',
+  figma:'tool-badge-figma', google:'tool-badge-google', sentry:'tool-badge-sentry',
+  context7:'tool-badge-context7', playwright:'tool-badge-playwright', thinking:'tool-badge-thinking',
+  mcp:'tool-badge-default'
+};
+
+// Mini-markdown renderer — operates on already-escaped HTML, safe from XSS
+function linkifyUrls(escapedHtml){
+  return escapedHtml.replace(
+    /https?:\/\/[^\s<&"']+/g,
+    url=>`<a class="bubble-link" href="${url}" target="_blank" rel="noopener">${url.length>60?url.substring(0,57)+'…':url}</a>`
+  );
+}
+
+function miniMarkdown(escaped){
+  return escaped
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,'<em>$1</em>')
+    .replace(/`([^`]+)`/g,'<code class="md-code">$1</code>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a class="md-link" href="$2" target="_blank" rel="noopener">$1</a>');
+}
+
+// Dedup tracking for consecutive identical tool lines
+let _lastToolLine = '', _lastToolCount = 0;
 
 function _ts(line){
   // Extract and format timestamp: [HH:MM:SS] → subtle prefix
@@ -682,8 +726,14 @@ function colorize(line){
     const cls=code==='0'?'log-exit-ok':'log-exit-err';
     return`<span class="${cls}">${ts}${esc(rest)}</span>`;
   }
-  // Token counts
-  if(rest.includes('tokens:')&&rest.includes('in/')&&rest.includes('out'))
+  // Token counts — formatted with arrows
+  const tokMatch=rest.match(_reTokens);
+  if(tokMatch){
+    const tin=tokMatch[1],tout=tokMatch[2],mdl=tokMatch[3];
+    const tagClass=mdl==='opus'?'model-tag-opus':mdl==='haiku'?'model-tag-haiku':'model-tag-sonnet';
+    return`<span class="log-tokens">${ts}<span class="tok-in">↓${tin}</span> <span class="tok-out">↑${tout}</span> <span class="model-tag ${tagClass}" style="font-size:8px">${esc(mdl)}</span></span>`;
+  }
+  if(rest.includes('tokens:')&&rest.includes('in')&&rest.includes('out'))
     return`<span class="log-tokens">${ts}${esc(rest)}</span>`;
   // Boot / system lines — dim them
   if(rest.match(/^===\s*\w+\s*===$|^  (thinking|coding|hub ok|CLI:|🔗 MCP)/))
@@ -712,9 +762,9 @@ function colorize(line){
     const preview=body.substring(0,80)+(body.length>80?'…':'');
     return`<details class="chat-reply-block"><summary class="text-stream">${ts}${esc(header)}: ${esc(preview)}</summary><div class="chat-reply-body">${esc(body)}</div></details>`;
   }
-  // Text streaming (Claude output)
+  // Text streaming (Claude output) — with mini-markdown
   if(rest.includes('💬'))
-    return`<span class="text-stream">${esc(rest.replace(_reTextStream,''))}</span>`;
+    return`<span class="text-stream">${miniMarkdown(esc(rest.replace(_reTextStream,'')))}</span>`;
   // Hub calls — humanized
   if(rest.includes('📡')){
     const h=humanizeHubLog(rest);
@@ -722,8 +772,15 @@ function colorize(line){
     if(h.text!==rest)return`<span class="hub-call-human">${ts}${esc(h.text)}</span>`;
     return`<span class="hub-call">${ts}${esc(rest)}</span>`;
   }
-  // Tool use with badges
+  // Tool use with badges — MCP format: 🔧 [category] Name -- detail
   if(rest.includes('🔧')){
+    const mcpMatch=rest.match(_reToolUseMcp);
+    if(mcpMatch){
+      const category=mcpMatch[1],name=mcpMatch[2].trim(),detail=(mcpMatch[3]||'').trim();
+      const badgeClass=_mcpBadgeMap[category]||'tool-badge-default';
+      return`<span class="tool">${ts}<span class="tool-badge ${badgeClass}">${esc(name)}</span>${detail?` <span class="log-dim">${esc(detail)}</span>`:''}</span>`;
+    }
+    // Legacy format: 🔧 ToolName: detail
     const toolMatch=rest.match(_reToolUse);
     if(toolMatch){
       const tool=toolMatch[1],detail=toolMatch[2]||'';
@@ -1500,7 +1557,7 @@ function renderInbox(p){
         const fullContent=isLong?esc(content):'';
         const timeStr=relativeTime(m.timestamp);
         if(m.sender==='user'){
-          return`<div class="chat-bubble chat-bubble-user">${displayContent}${isLong?`<span class="bubble-collapsed" data-full="${fullContent.replace(/"/g,'&quot;')}">… <button class="bubble-toggle" onclick="expandBubble(this)">Show more</button></span>`:''}<div class="bubble-meta">you · ${timeStr}</div></div>`;
+          return`<div class="chat-bubble chat-bubble-user">${linkifyUrls(displayContent)}${isLong?`<span class="bubble-collapsed" data-full="${fullContent.replace(/"/g,'&quot;')}">… <button class="bubble-toggle" onclick="expandBubble(this)">Show more</button></span>`:''}<div class="bubble-meta">you · ${timeStr}</div></div>`;
         }
         if(m.msg_type==='plan_proposal'){
           const planId=m.plan_id;
@@ -1526,7 +1583,7 @@ function renderInbox(p){
           const doneLabel=planStatus==='approved'?`<span style="font-size:11px;font-weight:600;color:var(--green)">Approved</span>`
             :planStatus==='dismissed'?`<span style="font-size:11px;font-weight:600;color:var(--fg3)">Dismissed</span>`:'';
           return`<div class="chat-bubble chat-bubble-agent plan-proposal-bubble"${isDone?' style="opacity:0.6"':''}>
-            <div class="plan-header"><span class="plan-badge">Plan</span><span class="plan-title">${displayContent}</span></div>
+            <div class="plan-header"><span class="plan-badge">Plan</span><span class="plan-title">${miniMarkdown(displayContent)}</span></div>
             ${steps.length?`<div class="plan-steps">
               ${isDone?'':`<div class="plan-toolbar"><label class="plan-select-all"><input type="checkbox" checked onchange="toggleAllPlanSteps(this,${planId})"> Select all (${steps.length} steps)</label></div>`}
               ${stepsHtml}
@@ -1542,7 +1599,7 @@ function renderInbox(p){
           const commitId=`commit_${(proj+branch).replace(/\W/g,'_')}`;
           return`<div class="chat-bubble chat-bubble-agent review-request-bubble">
             <span class="bubble-type" style="background:var(--green);color:#000">review</span>
-            ${displayContent}${isLong?`<span class="bubble-collapsed" data-full="${fullContent.replace(/"/g,'&quot;')}">… <button class="bubble-toggle" onclick="expandBubble(this)">Show more</button></span>`:''}
+            ${miniMarkdown(displayContent)}${isLong?`<span class="bubble-collapsed" data-full="${fullContent.replace(/"/g,'&quot;')}">… <button class="bubble-toggle" onclick="expandBubble(this)">Show more</button></span>`:''}
             <div class="commit-actions" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
               <input id="${commitId}" class="commit-msg-input" value="${escAttr(suggested)}" placeholder="Commit message..." style="width:100%;padding:6px 8px;background:var(--bg2);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px;margin-bottom:6px">
               <div class="flex-center gap-4">
@@ -1553,15 +1610,15 @@ function renderInbox(p){
             </div>
             <div class="bubble-meta">${timeStr}</div></div>`;
         }
-        return`<div class="chat-bubble chat-bubble-agent">${m.msg_type&&m.msg_type!=='info'&&m.msg_type!=='message'?`<span class="bubble-type">${m.msg_type}</span>`:''
-          }${displayContent}${isLong?`<span class="bubble-collapsed" data-full="${fullContent.replace(/"/g,'&quot;')}">… <button class="bubble-toggle" onclick="expandBubble(this)">Show more</button></span>`:''
-          }${m.msg_type==='check_report'?`<div class="bubble-actions"><button class="btn-sm" style="background:var(--ac);color:#fff" onclick="navigator.clipboard.writeText(${JSON.stringify(content).replace(/'/g,"\\'")});toast('Copied','success',2000)">📋 Copy</button></div>`:''
+        return`<div class="chat-bubble chat-bubble-agent">${m.msg_type&&m.msg_type!=='info'&&m.msg_type!=='message'&&m.msg_type!=='chat'?`<span class="bubble-type">${m.msg_type}</span>`:''
+          }${miniMarkdown(displayContent)}${isLong?`<span class="bubble-collapsed" data-full="${fullContent.replace(/"/g,'&quot;')}">… <button class="bubble-toggle" onclick="expandBubble(this)">Show more</button></span>`:''
+          }${m.msg_type==='check_report'?`<div class="bubble-actions"><button class="btn-sm" style="background:var(--ac);color:#fff" onclick="navigator.clipboard.writeText(${escAttr(JSON.stringify(content))});toast(&quot;Copied&quot;,&quot;success&quot;,2000)">📋 Copy</button></div>`:''
           }<div class="bubble-meta">${timeStr}</div></div>`;
       }).join('')}
       </div>
       <div class="inbox-reply"><input id="${replyId}" placeholder="Reply to ${esc(agent)}..." onkeydown="if(event.key==='Enter'){event.preventDefault();replyTo('${escAttr(agent)}','${replyId}')}">
         <button onclick="replyTo('${escAttr(agent)}','${replyId}')">Reply</button>
-        <button onclick="inboxToTask('${escAttr(agent)}',${JSON.stringify(lastMsg.content.substring(0,500))})" title="Convert to task" class="btn-ghost btn-sm">📋</button></div></div>`;}).join('');
+        <button onclick="inboxToTask('${escAttr(agent)}',${escAttr(JSON.stringify(lastMsg.content.substring(0,500)))})" title="Convert to task" class="btn-ghost btn-sm">📋</button></div></div>`;}).join('');
 
   // Restore saved input values
   for(const [id,val] of Object.entries(savedInputs)){
@@ -1578,11 +1635,12 @@ function expandBubble(btn){
   const full=span.dataset.full;
   if(!full)return;
   const bubble=span.closest('.chat-bubble');
-  // Replace truncated text + toggle with full text
   const meta=bubble.querySelector('.bubble-meta');
   const actions=bubble.querySelector('.bubble-actions');
   const typeSpan=bubble.querySelector('.bubble-type');
-  bubble.innerHTML=(typeSpan?typeSpan.outerHTML:'')+full+(actions?actions.outerHTML:'')+(meta?meta.outerHTML:'');
+  const isAgent=bubble.classList.contains('chat-bubble-agent');
+  const rendered=isAgent?miniMarkdown(full):linkifyUrls(full);
+  bubble.innerHTML=(typeSpan?typeSpan.outerHTML:'')+rendered+(actions?actions.outerHTML:'')+(meta?meta.outerHTML:'');
 }
 
 function startChatWith(agent){
