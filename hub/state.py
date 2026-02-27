@@ -563,7 +563,9 @@ def load_state():
     global pattern_registry, _pattern_id_counter
     global pending_plans, _plan_counter, cache_registry
     global task_comments, task_reviews, _comment_counter, workspace_registry, webhook_registry
+    global _state_initialized
     if not STATE_FILE or not os.path.exists(STATE_FILE):
+        _state_initialized = True
         return
     try:
         with open(STATE_FILE) as f:
@@ -594,6 +596,7 @@ def load_state():
                 "content": "⚠️ State file and all backups were corrupt or missing. Starting with fresh state — previous tasks/data lost.",
                 "msg_type": "blocker", "timestamp": datetime.now().isoformat(),
             })
+            _state_initialized = True
             return
         # Notify dashboard about backup restore
         messages.setdefault("user", []).append({
@@ -638,7 +641,6 @@ def load_state():
         logger.info(f"Restored: {len(tasks)} tasks, {len(pattern_registry)} patterns, {len(um)} inbox")
     except Exception as e:
         logger.warning(f"load: {e}")
-    global _state_initialized
     _state_initialized = True
 
 
