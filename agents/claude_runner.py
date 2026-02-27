@@ -317,7 +317,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                     cmd.extend(["--add-dir", d])
 
             # ── Session continuity ──
-            # Task-based sessions: same task always resumes same session (survives rework)
+            # --session-id requires --continue or --resume (Claude CLI constraint)
             _task_sid = None
             if ctx.current_task_id:
                 _task_sid = ctx.get_task_session(ctx.current_task_id)
