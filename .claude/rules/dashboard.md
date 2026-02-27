@@ -34,3 +34,14 @@ CSS: `grid-template-columns:repeat(7,1fr)`, responsive breakpoints collapse to f
 ## Hidden Agents
 
 Agents in `HIDDEN_AGENTS` are filtered from the dashboard agent list but their activity appears in the activity feed and review comment sections.
+
+## Known Gaps
+
+When modifying dashboard code, be aware of these documented issues (see GRAPH.md for full details):
+
+- **D1**: No WebSocket heartbeat/ping-pong — silent disconnects after firewall timeout (app.js:160, websocket.py:96)
+- **D2**: Reconnection backoff too aggressive — 57s max delay (app.js:154)
+- **D3**: Dashboard cache not invalidated on hub restart — shows stale data (app.js:232-240)
+- **D4**: No loading spinners during long operations like git push (app.js)
+- **D5**: HTTP fetch calls missing `.catch()` — unhandled promise rejections (app.js:1194)
+- **D6**: No XSS protection on task descriptions in some rendering contexts (app.js)

@@ -56,3 +56,20 @@ Each router is in `hub/routers/`. Register new routers in `hub/routers/__init__.
 ## Pattern Registry
 
 Patterns live in `pattern_registry` dict. Score range: -5 to 10. Auto-prune at score <= -3. Categories are fixed in `PATTERN_CATEGORIES` list.
+
+## Known Gaps
+
+When modifying hub code, be aware of these documented issues (see GRAPH.md for full details):
+
+- **H1**: Task status transitions not atomic — dispatch failure leaves partial state (tasks.py:114-336)
+- **H2**: Save batching (5s) — crash can lose recent tasks (state.py:429-436)
+- **H3**: Reviewer timeout moves parent to in_testing but doesn't cancel subtasks (state.py:1077-1250)
+- **H4**: State lock not held across network calls in message routing (messages.py:44-164)
+- **H5**: Hub crash leaves orphaned workers — duplicate workers on restart (start.py:505-601)
+- **H6**: Message queue unbounded growth, no max per agent (state.py:122-127)
+- **H7**: QA dispatch without checking QA agent availability (tasks.py:549-645)
+- **H8**: Rework cycle counter not properly enforced across code_review/QA/UAT (tasks.py:725-828)
+- **H9**: UAT has no timeout — task stuck in UAT indefinitely
+- **H10**: Plan steps with non-existent agents — tasks created but unassignable (messages.py:84-135)
+- **H11**: No state machine validation — can transition directly code_review→done (tasks.py:114-336)
+- **H12**: Port conflict causes silent startup failure (start.py:180-196)

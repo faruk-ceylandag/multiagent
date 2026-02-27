@@ -519,3 +519,110 @@ start.py
         ├── agents/credentials.py
         └── agents/log_utils.py
 ```
+
+## Known Gaps & Edge Cases
+
+Comprehensive audit of the system (Feb 2026). These are documented to guide future development — not all require immediate fixes.
+
+### Worker Loop Gaps (agents/worker.py)
+
+| # | Gap | Risk | Lines |
+|---|-----|------|-------|
+| W1 | Malformed hub response (non-list from poll) crashes loop | HIGH | 670-673 |
+| W2 | Poll loop has no exponential backoff on hub failure | HIGH | 570-576 |
+| W3 | Task stuck in `in_progress` if Claude hangs (no task-level timeout independent of CLI) | HIGH | 909, 1489 |
+| W4 | hub_post null returns not validated before `.get()` in many places | HIGH | 642, 654, 776, 917 |
+| W5 | Session map (`_session_map`) grows unbounded — never evicts old entries | LOW | context.py:109-114 |
+| W6 | Credential dedup can drop retry sends of same token | MED | 710-719 |
+| W7 | Credential wait `consume=false` peek then consume — not atomic | MED | 1069-1074 |
+| W8 | File lock is cooperative only — no enforcement, just warning | MED | 1451-1457 |
+| W9 | Auto-assign can race with manual assignment — no atomic claim | MED | 641-643 |
+| W10 | Chat handler thread not killed on task timeout | MED | 1487, 1489 |
+| W11 | Pattern voting penalizes patterns on unrelated failures | LOW | 1690-1698 |
+
+### Claude Runner Gaps (agents/claude_runner.py)
+
+| # | Gap | Risk | Lines |
+|---|-----|------|-------|
+| C1 | Process timeout only on `proc.wait()`, not actual execution time | HIGH | 505-516 |
+| C2 | OOM kill (SIGKILL/-9) treated as intentional cancel, not retried | HIGH | 527-529 |
+| C3 | Stderr thread never properly joined (5s timeout) — FD leak | MED | 516 |
+| C4 | No limit on stderr_lines size — OOM on huge error output | MED | 382-383 |
+| C5 | JSON line parsing silently drops incomplete lines | LOW | 407, 494 |
+| C6 | Rate limit detection uses substring match — false positives | LOW | 169, 552 |
+| C7 | No global retry budget per task (5 retries × N calls = unbounded) | MED | 216 |
+
+### Hub Server Gaps (hub/)
+
+| # | Gap | Risk | Lines |
+|---|-----|------|-------|
+| H1 | Task status transitions not atomic — dispatch failure leaves partial state | HIGH | tasks.py:114-336 |
+| H2 | Save batching (5s) — tasks created within 5s of last save lost on crash | HIGH | state.py:429-436 |
+| H3 | Reviewer timeout moves parent to in_testing but doesn't cancel subtasks | HIGH | state.py:1077-1250 |
+| H4 | State lock not held across network calls in message routing | HIGH | messages.py:44-164 |
+| H5 | Hub crash leaves orphaned workers — duplicate workers on restart | HIGH | start.py:505-601 |
+| H6 | Message queue unbounded growth (no max per agent) | MED | state.py:122-127 |
+| H7 | QA dispatch without checking QA agent availability | MED | tasks.py:549-645 |
+| H8 | Rework cycle counter not properly enforced across code_review/QA/UAT | MED | tasks.py:725-828 |
+| H9 | UAT has no timeout — task stuck in UAT indefinitely | MED | tasks.py |
+| H10 | Plan steps with non-existent agents — tasks created but unassignable | MED | messages.py:84-135 |
+| H11 | No state machine validation — can transition directly code_review→done | MED | tasks.py:114-336 |
+| H12 | Port conflict causes silent startup failure | MED | start.py:180-196 |
+
+### Dashboard Gaps (hub/dashboard/)
+
+| # | Gap | Risk | Lines |
+|---|-----|------|-------|
+| D1 | No WebSocket heartbeat/ping-pong — silent disconnects after firewall timeout | MED | app.js:160, websocket.py:96 |
+| D2 | Reconnection backoff too aggressive — 57s max delay | MED | app.js:154 |
+| D3 | Dashboard cache not invalidated on hub restart — shows stale data | MED | app.js:232-240 |
+| D4 | No loading spinners during long operations (git push, etc.) | LOW | app.js |
+| D5 | HTTP fetch calls missing `.catch()` — unhandled promise rejections | LOW | app.js:1194 |
+| D6 | No XSS protection on task descriptions in some contexts | MED | app.js |
+
+### Ecosystem & MCP Gaps
+
+| # | Gap | Risk | Lines |
+|---|-----|------|-------|
+| E1 | No MCP server crash detection — stdio servers die silently | HIGH | mcp_manager.py:131-212 |
+| E2 | Concurrent writes to ~/.claude.json unprotected (no file lock) | HIGH | mcp_manager.py:35-91 |
+| E3 | File watcher race condition + broken debounce (local var reset) | HIGH | mcp_manager.py:404-461 |
+| E4 | Health check only verifies binary exists, not that server responds | MED | mcp_manager.py:514-541 |
+| E5 | Credential reload doesn't trigger MCP re-initialization in running CLI | MED | mcp_manager.py:307-356 |
+| E6 | Credentials stored in plaintext (no encryption at rest) | HIGH | credentials.py:24-44 |
+| E7 | No token expiration tracking (OAuth tokens expire silently) | MED | credentials.py |
+| E8 | Pattern classification keyword-only — no semantic understanding | LOW | learning.py:178-207 |
+| E9 | No JSON schema validation for multiagent.json | MED | config.py:35-105 |
+| E10 | Config hot-reload not actually implemented for multiagent.json (only .mcp.json) | MED | config.py |
+
+### Git Operations Gaps (agents/git_ops.py)
+
+| # | Gap | Risk | Lines |
+|---|-----|------|-------|
+| G1 | Stash pop conflict uses `checkout --theirs` — doesn't resolve all conflicts | HIGH | 205-216 |
+| G2 | Git command 15s timeout not caught as TimeoutExpired | MED | 51-57 |
+| G3 | Rollback returns True even if stash pop fails | MED | 136-141 |
+| G4 | Branch name sanitization can create invalid names on truncation | LOW | 163-172 |
+
+### Verification Gaps (agents/verify.py)
+
+| # | Gap | Risk | Lines |
+|---|-----|------|-------|
+| V1 | Verify stuck if Claude doesn't write result file — loops until max_cycles | MED | 104-108 |
+| V2 | No check if project actually has test/lint commands | MED | 41-84 |
+| V3 | Max cycles can be 1 for single-file changes — no retry | LOW | 51-56 |
+
+### Missing Safety Guards
+
+Based on the gaps above, these guards should be added:
+
+| Guard Needed | Addresses | What it would prevent |
+|---|---|---|
+| Hub response validation in poll loop | W1, W4 | Crash on malformed hub response |
+| Exponential backoff on hub failure | W2 | Tight retry loops hammering dead hub |
+| Task-level timeout (independent of CLI) | W3 | Tasks stuck forever when Claude hangs |
+| Atomic task status transitions | H1, H11 | Partial state on dispatch failure, invalid transitions |
+| MCP server liveness monitoring | E1 | Silent MCP death leaving agents without tools |
+| File lock on ~/.claude.json writes | E2 | Corrupted config from concurrent agent writes |
+| Credential encryption at rest | E6 | Plaintext secrets on disk |
+| WebSocket ping-pong heartbeat | D1 | Silent dashboard disconnects |

@@ -126,6 +126,7 @@ ma kill                      # stop everything
 - **Self-healing** — crashed agents restart automatically, sessions recover, stale locks get cleaned up
 - **Live ecosystem** — agents discover tools at runtime, learn from each other, share knowledge across the team
 - **Budget-safe** — per-agent cost limits, real-time cost tracking on dashboard
+- **Transparent about limits** — known edge cases documented in GRAPH.md; cooperative file locking, 5-10s save batching, no encryption at rest for credentials
 
 ## Requirements
 

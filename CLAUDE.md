@@ -62,6 +62,18 @@ ma kill                      # stop everything
 
 `multiagent.json` in project root or `config.json` in MA_DIR. Hot-reloaded every 15s — no restart needed.
 
+## Known Limitations
+
+- **No task-level timeout**: If Claude CLI hangs, task stays `in_progress` indefinitely
+- **Save batching**: Hub saves every 5-10s — crash can lose recent tasks
+- **Cooperative file locks**: Agents warned about conflicts but not prevented from editing
+- **No state machine enforcement**: Invalid status transitions possible via API
+- **MCP servers can die silently**: stdio MCP processes not monitored after start
+- **Credentials in plaintext**: `credentials.env` stored with chmod 600 but no encryption
+- **Config hot-reload partial**: Only `.mcp.json` watches for changes, not `multiagent.json`
+
+See `GRAPH.md` "Known Gaps & Edge Cases" for the full audit (~80 gaps with line references).
+
 ## URL Routing — Use the Right MCP Tool
 
 When a user provides a URL, use the matching MCP tool;

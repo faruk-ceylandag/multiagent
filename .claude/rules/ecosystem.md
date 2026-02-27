@@ -63,3 +63,18 @@ Token-efficient context injection. Analyzes task keywords → returns only relev
 - `/review` — Run code review on current diff
 - `/submit-review` — Submit review verdict (for reviewer agents)
 - `/uat` — Submit UAT decision (approve/reject)
+
+## Known Gaps
+
+When modifying ecosystem code, be aware of these documented issues (see GRAPH.md for full details):
+
+- **E1**: No MCP server crash detection — stdio servers die silently (mcp_manager.py:131-212)
+- **E2**: Concurrent writes to ~/.claude.json unprotected, no file lock (mcp_manager.py:35-91)
+- **E3**: File watcher race condition + broken debounce with local var reset (mcp_manager.py:404-461)
+- **E4**: Health check only verifies binary exists, not that server responds (mcp_manager.py:514-541)
+- **E5**: Credential reload doesn't trigger MCP re-initialization in running CLI (mcp_manager.py:307-356)
+- **E6**: Credentials stored in plaintext, no encryption at rest (credentials.py:24-44)
+- **E7**: No token expiration tracking — OAuth tokens expire silently (credentials.py)
+- **E8**: Pattern classification keyword-only, no semantic understanding (learning.py:178-207)
+- **E9**: No JSON schema validation for multiagent.json (config.py:35-105)
+- **E10**: Config hot-reload not actually implemented for multiagent.json, only .mcp.json (config.py)
