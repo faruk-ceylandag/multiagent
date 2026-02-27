@@ -569,13 +569,35 @@ def _dispatch_qa(tid):
         f"Run relevant test suites, linters, and verify the changes work correctly.\n"
         f"If tests pass, report SUCCESS. If tests fail, report FAILURE with details."
     )
+
+    # Create QA subtask (like review subtasks)
+    sub_tid = max(tasks.keys(), default=0) + 1
+    tasks[sub_tid] = {
+        "id": sub_tid,
+        "description": qa_msg,
+        "assigned_to": qa_agent,
+        "status": "to_do",
+        "depends_on": [],
+        "project": project,
+        "branch": branch,
+        "task_external_id": task.get("task_external_id", ""),
+        "parent_id": tid,
+        "priority": task.get("priority", 5),
+        "created": ts, "started_at": "", "completed_at": "",
+        "created_by": "system",
+        "_is_qa_subtask": True,
+        "_review_parent_id": tid,
+    }
+    task["_qa_subtask_id"] = sub_tid
+
     messages.setdefault(qa_agent, []).append({
         "sender": "system", "receiver": qa_agent,
         "content": qa_msg,
-        "msg_type": "task", "task_id": str(tid),
+        "msg_type": "task", "task_id": str(sub_tid),
+        "_review_parent_id": tid,
         "timestamp": ts,
     })
-    add_activity("system", qa_agent, "qa_dispatched", f"QA test #{tid} dispatched to {qa_agent}")
+    add_activity("system", qa_agent, "qa_dispatched", f"QA test #{tid} dispatched to {qa_agent} (subtask #{sub_tid})")
     bump_version()
 
 
@@ -611,6 +633,12 @@ def _handle_qa_failure(tid, old_status, detail=""):
         })
         logger.info(f"QA cycle max reached: #{tid} ({qa_cycle} cycles)")
         return False
+
+    # Mark QA subtask as failed
+    qa_sub_id = task.get("_qa_subtask_id")
+    if qa_sub_id and qa_sub_id in tasks:
+        tasks[qa_sub_id]["status"] = "failed"
+        tasks[qa_sub_id]["completed_at"] = datetime.now().isoformat()
 
     # Redirect: set task back to in_progress (same task, new cycle)
     task["status"] = "in_progress"
@@ -832,7 +860,23 @@ def _compute_critical_path(nodes, edges):
 def get_task(tid: int):
     if tid not in tasks:
         return {"status": "not_found"}
-    return dict(tasks[tid])
+    t = dict(tasks[tid])
+    # Collect subtasks (review + QA)
+    subtasks = []
+    for st in tasks.values():
+        if st.get("parent_id") == tid or st.get("_review_parent_id") == tid:
+            subtasks.append({
+                "id": st["id"], "assigned_to": st.get("assigned_to", ""),
+                "status": st.get("status", ""),
+                "type": "review" if st.get("_is_review_subtask") else "qa" if st.get("_is_qa_subtask") else "task",
+            })
+    if subtasks:
+        t["_subtasks"] = subtasks
+    # Review verdicts
+    tid_str = str(tid)
+    if tid_str in task_reviews:
+        t["_reviews"] = task_reviews[tid_str]
+    return t
 
 @router.get("/tasks/{tid}/ready")
 def task_ready(tid: int):
@@ -858,7 +902,8 @@ def auto_assign_task(name: str):
         unassigned = [t for t in tasks.values()
                       if not t.get("assigned_to") and t.get("status") in ("to_do", "created")
                       and t.get("created_by") != name
-                      and not t.get("_is_review_subtask")]
+                      and not t.get("_is_review_subtask")
+                      and not t.get("_is_qa_subtask")]
         # Score unassigned tasks by role match
         from hub.state import ROUTE_MAP, agent_specialization
         agent_spec = agent_specialization.get(name, {})
