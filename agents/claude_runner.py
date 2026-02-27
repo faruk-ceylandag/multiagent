@@ -317,14 +317,15 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                     cmd.extend(["--add-dir", d])
 
             # ── Session continuity ──
-            # Task-based sessions: same task always resumes same session (survives rework)
+            # --session-id requires --continue or --resume (Claude CLI constraint)
             _task_sid = None
             if ctx.current_task_id:
                 _task_sid = ctx.get_task_session(ctx.current_task_id)
-                cmd.extend(["--session-id", _task_sid])
 
             if continue_session and ctx.valid_sid(ctx.SESSION_ID):
                 # --continue resumes last conversation without re-sending context
+                if _task_sid:
+                    cmd.extend(["--session-id", _task_sid])
                 cmd.extend(["--continue", "-p", prompt])
             elif ctx.valid_sid(ctx.SESSION_ID):
                 cmd.extend(["--resume", ctx.SESSION_ID])
