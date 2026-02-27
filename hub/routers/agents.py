@@ -2,7 +2,7 @@
 
 import os, json, re, time, subprocess, threading, signal
 from datetime import datetime
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from fastapi import APIRouter
 
 from hub.state import (
@@ -13,6 +13,26 @@ from hub.state import (
 )
 
 router = APIRouter(tags=["agents"])
+
+
+def _classify_task_type(desc):
+    """Classify task description into a category."""
+    desc_lower = (desc or "").lower()
+    categories = {
+        "frontend": ["frontend", "ui", "css", "component", "vue", "react", "page", "layout", "style", "html", "design"],
+        "backend": ["api", "endpoint", "database", "migration", "model", "controller", "middleware", "sql", "backend"],
+        "testing": ["test", "spec", "e2e", "playwright", "cypress", "coverage", "lint"],
+        "devops": ["deploy", "docker", "ci", "pipeline", "k8s", "infrastructure", "build"],
+        "docs": ["docs", "readme", "documentation", "comment", "jsdoc"],
+    }
+    best_cat, best_score = "", 0
+    for cat, keywords in categories.items():
+        score = sum(1 for kw in keywords if kw in desc_lower)
+        if score > best_score:
+            best_score = score
+            best_cat = cat
+    return best_cat if best_score > 0 else ""
+
 
 # ── Routing ──
 @router.get("/route")
@@ -113,6 +133,17 @@ def detect_route(msg: str = ""):
         spec = agent_specialization.get(a, {})
         if spec.get("score", 0) > 5:
             scores[a] = scores.get(a, 0) + 1
+    # Specialization bonus: +8 for agents with >66% success rate on matching task type
+    task_type = _classify_task_type(msg)
+    if task_type:
+        for agent_name, spec in dict(agent_specialization).items():
+            if agent_name not in scores:
+                continue
+            type_data = spec.get(task_type, spec.get("task_type", {}).get(task_type, {}))
+            if isinstance(type_data, dict):
+                total = type_data.get("success", 0) + type_data.get("failure", 0)
+                if total >= 3 and type_data.get("success", 0) / total > 0.66:
+                    scores[agent_name] += 8
     # Factor in availability: boost idle agents, penalize busy/rate-limited
     for a in ALL_AGENTS:
         p = pipeline.get(a, {})
@@ -552,3 +583,55 @@ def restart_agent(name: str):
         pipeline[name] = {"status": "restarting", "detail": "restart requested", "since": datetime.now().isoformat()}
         add_activity("user", name, "restart", f"Restart requested for {name}")
     return {"status": "ok"}
+
+
+@router.post("/agents/tool_event")
+def tool_event(data: dict):
+    """Receive tool stream events from agents."""
+    from hub.state import tool_events, tool_counters, bump_version
+    name = data.get("agent_name", "")
+    event = data.get("event", {})
+    if not name or not event:
+        return {"status": "error", "message": "agent_name and event required"}
+    if name not in tool_events:
+        tool_events[name] = deque(maxlen=200)
+        tool_counters[name] = 0
+    event["_seq"] = tool_counters[name]
+    tool_counters[name] += 1
+    tool_events[name].append(event)
+    bump_version()
+    return {"status": "ok"}
+
+
+@router.post("/agents/rate_pool/acquire")
+def rate_pool_acquire():
+    """Try to acquire a token from the shared rate pool."""
+    from hub.state import rate_pool, lock
+    with lock:
+        now = time.time()
+        elapsed = now - rate_pool["last_refill"]
+        rate_pool["bucket_tokens"] = min(rate_pool["bucket_max"], rate_pool["bucket_tokens"] + elapsed * rate_pool["refill_rate"])
+        rate_pool["last_refill"] = now
+        if rate_pool["bucket_tokens"] >= 1:
+            rate_pool["bucket_tokens"] -= 1
+            return {"allowed": True, "wait": 0, "tokens": round(rate_pool["bucket_tokens"], 1)}
+        wait = (1 - rate_pool["bucket_tokens"]) / max(0.1, rate_pool["refill_rate"])
+        return {"allowed": False, "wait": round(wait, 1), "tokens": round(rate_pool["bucket_tokens"], 1)}
+
+
+@router.post("/agents/rate_pool/report")
+def rate_pool_report():
+    """Report rate limit hit — drain pool and reduce refill rate."""
+    from hub.state import rate_pool, lock, bump_version
+    with lock:
+        rate_pool["bucket_tokens"] = 0
+        rate_pool["refill_rate"] = max(0.1, rate_pool["refill_rate"] * 0.5)
+        bump_version()
+    return {"status": "ok", "refill_rate": rate_pool["refill_rate"]}
+
+
+@router.get("/agents/rate_pool/status")
+def rate_pool_status():
+    """Get current rate pool state."""
+    from hub.state import rate_pool
+    return dict(rate_pool)

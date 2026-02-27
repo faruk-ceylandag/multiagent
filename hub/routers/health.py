@@ -1,6 +1,7 @@
 """Health, config, diagnostics, and crash reporting routes."""
 
-import json, time
+import json
+import time
 from datetime import datetime
 from collections import deque
 from fastapi import APIRouter
@@ -8,7 +9,8 @@ from fastapi import APIRouter
 from hub.state import (
     lock, logger, ALL_AGENTS, WORKSPACE, _cfg, agents, pipeline,
     tasks, messages, changes, analytics_log, log_buffers, activity,
-    rate_limited_agents, sse_clients, crash_log, usage_log, bump_version,
+    rate_limited_agents, sse_clients, crash_log, bump_version,
+    _state_initialized,
 )
 
 router = APIRouter(tags=["health"])
@@ -51,6 +53,7 @@ def health():
 
     return {
         "status": status,
+        "initialized": _state_initialized,
         "agents": ALL_AGENTS,
         "workspace": WORKSPACE,
         "agent_summary": {"total": total, "active": active, "unresponsive": unresponsive},
@@ -310,7 +313,9 @@ def get_audit(limit: int = 100, actor: str = "", action: str = ""):
 @router.post("/shutdown")
 def shutdown_system():
     """Gracefully shut down the entire system (hub + agents)."""
-    import os, signal, threading
+    import os
+    import signal
+    import threading
     from hub.state import save_state
     logger.info("Shutdown requested from dashboard")
     save_state()
@@ -319,3 +324,66 @@ def shutdown_system():
         os.kill(os.getpid(), signal.SIGTERM)
     threading.Thread(target=_do_shutdown, daemon=True).start()
     return {"status": "ok", "message": "Shutting down..."}
+
+
+@router.get("/health/circuits")
+def get_circuits():
+    """Get all circuit breaker states."""
+    from hub.state import circuit_breakers
+    return dict(circuit_breakers)
+
+
+@router.post("/health/circuits/{key}/reset")
+def reset_circuit(key: str):
+    """Reset a circuit breaker to closed state."""
+    from hub.state import circuit_breakers, lock, bump_version
+    with lock:
+        if key in circuit_breakers:
+            circuit_breakers[key] = {"state": "closed", "failures": 0, "last_failure": 0, "cooldown": 120, "threshold": 5, "success_count": 0}
+            bump_version()
+            return {"status": "ok"}
+    return {"status": "error", "message": "circuit not found"}
+
+
+@router.get("/webhooks")
+def list_webhooks():
+    """List registered webhooks."""
+    from hub.state import webhook_registry
+    return list(webhook_registry)
+
+
+@router.post("/webhooks")
+def add_webhook(data: dict):
+    """Register a new webhook."""
+    from hub.state import webhook_registry, lock, bump_version, save_state
+    url = data.get("url", "").strip()
+    if not url:
+        return {"status": "error", "message": "url required"}
+    wh = {
+        "url": url,
+        "type": data.get("type", "generic"),
+        "events": data.get("events", []),
+        "name": data.get("name", url[:40]),
+        "active": data.get("active", True),
+    }
+    with lock:
+        webhook_registry.append(wh)
+        bump_version()
+        save_state()
+    return {"status": "ok", "webhook": wh}
+
+
+@router.post("/webhooks/test")
+def test_webhook(data: dict):
+    """Send a test notification to a webhook."""
+    url = data.get("url", "").strip()
+    if not url:
+        return {"status": "error", "message": "url required"}
+    try:
+        import urllib.request
+        payload = json.dumps({"event": "test", "message": "Test notification from Multi-Agent System", "timestamp": datetime.now().isoformat()}).encode()
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=5)
+        return {"status": "ok", "message": "test sent"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

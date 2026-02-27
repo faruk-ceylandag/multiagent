@@ -11,7 +11,10 @@ Sets up Claude Code's full feature stack for each agent:
 
 Called from start.py during boot.
 """
-import json, os, shutil, sys
+import json
+import os
+import shutil
+import sys
 
 ECOSYSTEM_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -100,14 +103,22 @@ def setup_agent_ecosystem(agent_name, agent_cwd, ma_dir, workspace, hub_url, sta
         agent_path = os.path.join(claude_dir, subdir)
         if not os.path.isdir(shared_path):
             continue
-        # Remove old copy/symlink
-        if os.path.islink(agent_path):
-            os.unlink(agent_path)
-        elif os.path.isdir(agent_path):
+        # Remove old non-symlink directory
+        if not os.path.islink(agent_path) and os.path.isdir(agent_path):
             shutil.rmtree(agent_path)
-        # Create relative symlink
+        # Atomic symlink swap: create tmp symlink, then os.replace()
         rel_target = os.path.relpath(shared_path, claude_dir)
-        os.symlink(rel_target, agent_path)
+        tmp_link = agent_path + ".tmp"
+        try:
+            os.symlink(rel_target, tmp_link)
+            os.replace(tmp_link, agent_path)
+        except OSError:
+            # Fallback: remove + create
+            try: os.unlink(tmp_link)
+            except OSError: pass
+            if os.path.islink(agent_path):
+                os.unlink(agent_path)
+            os.symlink(rel_target, agent_path)
 
     # Generate hooks + settings.json (per-agent — permissions differ by role)
     if stack_info is None:

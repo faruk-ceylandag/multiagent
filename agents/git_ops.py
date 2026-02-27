@@ -30,7 +30,7 @@ def lock_file(ctx, path):
     if r and r.get("status") == "locked":
         log(ctx, f"🔒 {path} locked by {r.get('by')}")
         return False
-    return True  # if hub unreachable, proceed
+    return False  # hub unreachable — don't assume lock acquired
 
 
 def unlock_file(ctx, path):
@@ -207,8 +207,10 @@ def git_branch(ctx, project, branch_name=None):
         if not pop_ok and pop_out:
             pop_lower = pop_out.lower()
             if "conflict" in pop_lower:
-                # Real conflict — changes partially applied, needs manual resolution
-                log(ctx, f"⚠ Stash pop conflict — resolve manually (stash kept)")
+                # Conflict — recover to clean state by accepting all incoming changes
+                log(ctx, f"⚠ Stash pop conflict — auto-resolving with incoming changes")
+                git(ctx, ["checkout", "--theirs", "."], d)
+                git(ctx, ["reset", "HEAD"], d)
             elif "no stash" in pop_lower:
                 pass  # Nothing to pop, fine
             # else: git stash pop succeeded but returned non-zero (normal — shows status)

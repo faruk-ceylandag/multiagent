@@ -55,6 +55,27 @@ except Exception: pass
         }]
     })
 
+    # ── PreToolUse: Block dangerous Bash commands ──
+    hooks["PreToolUse"].append({
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": '''python3 -c "
+import sys,json,re
+try:
+    inp=json.load(sys.stdin)
+    cmd=inp.get('tool_input',{}).get('command','')
+    if not cmd: sys.exit(0)
+    d=['rm\\\\s+-[rf]*\\\\s+/','sudo\\\\s+rm','chmod\\\\s+777','curl.+[|].+sh','curl.+[|].+bash','wget.+[|].+sh','mkfs[.]','dd\\\\s+if=','>\\\\s*/dev/sd']
+    for p in d:
+        if re.search(p,cmd):
+            print('BLOCKED: dangerous command: '+cmd[:80],file=sys.stderr)
+            sys.exit(2)
+except Exception: pass
+" '''
+        }]
+    })
+
     # ── PostToolUse: Auto-Format by file type ──
     formatters = []
 

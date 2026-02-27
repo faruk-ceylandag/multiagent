@@ -1,9 +1,9 @@
 """agents/learning.py — Learning extraction, skills loading, hooks, templates."""
-import os, sys, json, subprocess, re
-from datetime import datetime
+import os
+import sys
+import json
+import subprocess
 from .log_utils import log
-from .hub_client import hub_post, hub_msg
-from .git_ops import clean_title
 
 
 # ── Ecosystem smart hints (loaded lazily) ──
@@ -32,12 +32,6 @@ def truncate_context(ctx, text, limit=None):
 
     # Identify protected sections that should never be truncated
     # Role/contract info at the start, and the latest instructions at the end
-    protected_patterns = [
-        r'(?:^|\n)(You are .+?)(?=\n\n)',         # role definition
-        r'(?:^|\n)(## Contract.+?)(?=\n##|\Z)',    # contract section
-        r'(?:^|\n)(## Rules.+?)(?=\n##|\Z)',       # rules section
-        r'(?:^|\n)(=== MESSAGES ===.+?)(?=\Z)',    # latest messages bundle
-    ]
 
     # Find the last "=== MESSAGES ===" or task block — always keep it
     last_msg_idx = text.rfind("=== MESSAGES ===")
@@ -117,8 +111,10 @@ def _compress_diffs(text, max_len):
 def save_session(ctx):
     if ctx.SESSION_ID:
         try:
-            with open(ctx.SESSION_FILE, "w") as f:
+            tmp = ctx.SESSION_FILE + ".tmp"
+            with open(tmp, "w") as f:
                 f.write(ctx.SESSION_ID)
+            os.replace(tmp, ctx.SESSION_FILE)
         except OSError:
             pass
 
