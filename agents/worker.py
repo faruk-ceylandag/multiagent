@@ -1450,8 +1450,11 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
 {{contracts}}
 {{roster}}
 {{project_ctx}}
-IMMEDIATELY create the plan using the curl below. Do NOT read URLs, explore code, or call any tools except this ONE curl.
-URL content has been pre-fetched above — use it directly. If no pre-fetched content, include the raw URL in step descriptions with [USE X MCP] prefix.
+YOUR ONLY TASK: Output the curl below with the plan. NOTHING ELSE.
+NEVER ask questions. NEVER ask for confirmation. NEVER say "Would you like me to...".
+NEVER use AskUserQuestion. NEVER use ToolSearch. NEVER read files or explore code.
+If URL content is pre-fetched above, use it. If not, include the raw URL in step descriptions with [USE X MCP] prefix.
+Output ONLY this curl — no text before or after it:
 
 curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{
   "sender":"{{agent}}","receiver":"user","msg_type":"plan_proposal",
@@ -1466,12 +1469,12 @@ curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{
 
 RULES:
 1. SIMPLE TASK (one scope) → ONE step to the right specialist. MULTI-SCOPE → max 2-3 steps.
-2. Copy ALL context (URLs, requirements, acceptance criteria) into each step description verbatim. Agent has ZERO other context.
+2. Copy ALL context (URLs, requirements, acceptance criteria) into each step description verbatim.
 3. depends_on_step uses 0-based index. Chain: dev(0) → QA(1, depends_on_step:0).
 4. If task mentions a specific agent ("frontend fix X"), single step to that agent.
 5. Use EXTERNAL_ID from pre-fetched content in EVERY step's task_external_id. No ID? Leave empty.
 6. ALWAYS add a QA step (depends_on dev step) for verification.
-7. NEVER write code, explore, or read files. ONLY output the curl above.
+7. NEVER ask questions, NEVER explore. Output the curl and STOP.
 {{branch_info}}{{hints}}""")
         else:
             task_tpl = load_template(ctx, "task", """You are {{agent}}.{{role_ctx}}

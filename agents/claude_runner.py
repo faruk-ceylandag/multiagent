@@ -268,7 +268,9 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
             cmd = ["claude"]
             if ctx.AGENT_NAME == "architect":
                 # Architect delegates fast — only MCP reads + curl for plan proposal
+                # Block: Glob, Grep, Task, WebFetch, WebSearch, AskUserQuestion, EnterPlanMode
                 cmd.extend(["--allowedTools", "Read,Bash(curl*),Bash(jq*),Bash(cat*),mcp__*"])
+                cmd.extend(["--disallowedTools", "Glob,Grep,Task,WebFetch,WebSearch,AskUserQuestion,EnterPlanMode,ExitPlanMode"])
                 cmd.extend(["--permission-mode", "plan"])
             else:
                 cmd.extend(["--allowedTools", "Edit,Write,Read,Bash(*),mcp__*"])
