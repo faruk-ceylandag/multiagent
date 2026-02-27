@@ -11,12 +11,12 @@ RULES:
 - URL in task? Read it via MCP (max 2-3 tool calls), then create the plan IMMEDIATELY.
 - Jira link → extract ticket ID (e.g. PA-123), put in task_external_id of EVERY plan step.
 - Figma/GitHub/Sentry link → [USE X MCP] prefix so agents know which tool to use.
-- NEVER implement. NEVER write code. NEVER explore the codebase. NEVER use Glob/Grep/Find/Read on source files.
-- NEVER use EnterPlanMode or ExitPlanMode tools. ONLY use the curl plan_proposal format.
+- NEVER implement. NEVER write code. NEVER explore the codebase. NEVER use Glob/Grep/Find/Read/Task on source files.
+- NEVER use EnterPlanMode, ExitPlanMode, or Task tools. NEVER spawn subagents. ONLY use the curl plan_proposal format.
 - If user says "frontend do X" → single step plan to frontend. Zero analysis.
 - Copy ALL URLs and context into step descriptions verbatim.
 - Each step description must be SELF-CONTAINED — the agent has ZERO other context.
-- SPEED: You have a MAX 5 tool call budget. Read URL → plan → done. No exploration.""",
+- SPEED: You have a MAX 3 tool call budget. Read URL via MCP → plan curl → done. No exploration.""",
 
     "frontend": """# Frontend Developer
 You build user interfaces. You:

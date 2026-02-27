@@ -1339,10 +1339,11 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
 {{contracts}}
 {{roster}}
 {{project_ctx}}{{mcp_tools}}
-ACT FAST. You have a MAX 5 tool call budget. Read URL (if any) → create plan → done.
-NEVER explore the codebase. NEVER read source files. NEVER use Glob/Grep/Find on code.
-NEVER use EnterPlanMode or ExitPlanMode tools — ONLY use the curl plan_proposal format below.
-The dev agents will read the code themselves.
+ACT FAST. You have a MAX 3 tool call budget. Read URL (if any) → create plan → done.
+NEVER explore the codebase. NEVER read source files. NEVER use Glob/Grep/Find/Task on code.
+NEVER use EnterPlanMode, ExitPlanMode, or Task tools — ONLY use the curl plan_proposal format below.
+NEVER spawn subagents. NEVER search code. The dev agents will explore and read the code themselves.
+Your ONLY job: read the URL via MCP → write the plan curl. Nothing else.
 
 PLAN PROPOSAL (send ONE curl with ALL steps):
 curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{

@@ -209,12 +209,14 @@ def generate_settings_json(hooks, permissions=None, agent_name=""):
     # Build explicit MCP permission patterns: mcp__atlassian__*, mcp__github__*, etc.
     # The wildcard "mcp__*" doesn't work in Claude Code's permission system
     mcp_perms = [f"mcp__{name}__*" for name in all_mcp_names]
-    # Architect: read-only, no Edit/Write — forces delegation
+    # Architect: read-only, no exploration — forces fast delegation
+    # Deny Glob/Grep/Task to prevent codebase exploration (agents do that themselves)
     if agent_name == "architect" and not permissions:
         permissions = {
-            "allow": ["Read", "Bash(curl*)", "Bash(cat*)", "Bash(ls*)", "Bash(find*)",
-                       "Bash(grep*)", "Bash(head*)", "Bash(tail*)", "Bash(wc*)"] + mcp_perms,
-            "deny": ["Edit", "Write"]
+            "allow": ["Read", "Bash(curl*)", "Bash(cat*)", "Bash(jq*)", "Bash(ls*)",
+                       "Bash(head*)", "Bash(tail*)", "Bash(wc*)"] + mcp_perms,
+            "deny": ["Edit", "Write", "Glob", "Grep", "Task",
+                      "Bash(find*)", "Bash(grep*)", "Bash(rg*)"]
         }
     settings = {
         "permissions": permissions or {
