@@ -3,6 +3,11 @@ import os
 import json
 
 DEFAULT_PORT = 8040
+MODEL_ALIASES = {
+    "haiku": "claude-haiku-4-5-20251001",
+    "sonnet": "claude-sonnet-4-5-20250929",
+    "opus": "claude-opus-4-6",
+}
 DEFAULT_AGENTS = [
     {"name": "architect", "role": "system architect & team lead", "model": ""},
     {"name": "frontend", "role": "frontend developer", "model": ""},
@@ -46,7 +51,7 @@ def load_config(workspace: str) -> dict:
         "coding_model": "claude-opus-4-6",
         "boot_stagger": 2,
         "max_context": 12000,
-        "mcp_servers": {},
+        "mcp_servers": None,  # None = auto-detect all; {} = explicitly none
         "budget_limit": 0,
         "budget_per_agent": 0,
         "notifications_webhook": {},
@@ -83,6 +88,14 @@ def load_config(workspace: str) -> dict:
                 import logging
                 logging.getLogger("config").warning(f"Config parse error: {e}")
             break
+    # Model aliases: merge user overrides with defaults
+    user_aliases = cfg.get("model_aliases", {})
+    if isinstance(user_aliases, dict) and user_aliases:
+        merged = dict(MODEL_ALIASES)
+        merged.update(user_aliases)
+        cfg["_model_aliases"] = merged
+    else:
+        cfg["_model_aliases"] = dict(MODEL_ALIASES)
     # Bounds validation
     _bounds = {
         "port": (1024, 65535),

@@ -152,6 +152,7 @@ def setup_agent_ecosystem(agent_name, agent_cwd, ma_dir, workspace, hub_url, sta
     mcp_path = os.path.join(agent_cwd, ".mcp.json")
     with open(mcp_path, "w") as f:
         json.dump(mcp_data, f, indent=2)
+    os.chmod(mcp_path, 0o600)
     mcp_count = len(mcp_data.get("mcpServers", {}))
     results.append(f"  mcp: {mcp_count} servers")
 

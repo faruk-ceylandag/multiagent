@@ -83,21 +83,28 @@ if _args.standalone:
 else:
     MA_DIR = os.path.join(WORKSPACE, ".multiagent")
 
-# ── Daemon mode ──
+# ── Daemon mode (double-fork for proper daemonization) ──
 if _args.daemon:
-    # Fork and detach from terminal
+    # First fork — parent exits, child becomes orphan
     try:
         pid = os.fork()
         if pid > 0:
-            # Parent process — print PID and exit
-            print(f"  Multi-Agent daemon started (PID {pid})")
+            print(f"  Multi-Agent daemon starting...")
             print(f"  Logs: {os.path.join(MA_DIR, 'logs', 'hub.log')}")
             sys.exit(0)
     except OSError as e:
         print(f"  Fork failed: {e}", file=sys.stderr)
         sys.exit(1)
-    # Child process — become session leader
+    # First child — become session leader, detach from terminal
     os.setsid()
+    # Second fork — prevent reacquiring a controlling terminal
+    try:
+        pid = os.fork()
+        if pid > 0:
+            sys.exit(0)  # First child exits
+    except OSError as e:
+        sys.exit(1)
+    # Grandchild — the actual daemon process
     # Redirect stdout/stderr to log file
     os.makedirs(os.path.join(MA_DIR, "logs"), exist_ok=True)
     _daemon_log = os.path.join(MA_DIR, "logs", "daemon.log")
@@ -443,16 +450,29 @@ with open(os.path.join(MA_DIR, ".hub.pid"), "w") as f: f.write(str(hub_proc.pid)
 with open(os.path.join(MA_DIR, ".hub.port"), "w") as f: f.write(str(HUB_PORT))
 log(f"Hub on :{HUB_PORT}")
 
+# ── Kill orphaned workers from previous run ──
+try:
+    r = subprocess.run(["pgrep", "-f", f"agents.worker.*{MA_DIR}"], capture_output=True, text=True, timeout=5)
+    for pid_str in r.stdout.strip().split("\n"):
+        pid_str = pid_str.strip()
+        if pid_str and pid_str != str(os.getpid()):
+            try:
+                os.kill(int(pid_str), signal.SIGTERM)
+                log(f"Killed orphaned worker (PID {pid_str})")
+            except (OSError, ValueError):
+                pass
+    if r.stdout.strip():
+        time.sleep(1)  # Give them time to exit
+except (OSError, subprocess.TimeoutExpired):
+    pass
+
 # ── Launch Workers (staggered to avoid rate limits) ──
 python = sys.executable
 workers = {}
 BOOT_STAGGER = cfg.get("boot_stagger", 1)  # seconds between agent boots (no API call at boot, so minimal stagger)
 
-_MODEL_ALIASES = {
-    "haiku": "claude-haiku-4-5-20251001",
-    "sonnet": "claude-sonnet-4-5-20250929",
-    "opus": "claude-opus-4-6",
-}
+from lib.config import MODEL_ALIASES
+_MODEL_ALIASES = cfg.get("_model_aliases", MODEL_ALIASES)
 
 def launch_worker(agent_cfg):
     name = agent_cfg["name"] if isinstance(agent_cfg, dict) else agent_cfg
@@ -470,15 +490,16 @@ def launch_worker(agent_cfg):
     worker_env["MA_HAIKU_MODEL"] = cfg.get("haiku_model", "claude-haiku-4-5-20251001")
     worker_env["MA_AUTO_VERIFY"] = "1" if cfg.get("auto_verify", True) else "0"
     worker_env["MA_MAX_CONTEXT"] = str(cfg.get("max_context", 12000))
-    _mcp_cfg = cfg.get("mcp_servers", {})
-    if not _mcp_cfg:
-        # Empty → pass full registry specs so agents can register them
+    _mcp_cfg = cfg.get("mcp_servers", None)
+    if _mcp_cfg is None:
+        # Key missing entirely → default to full registry
         try:
             from ecosystem.mcp.setup_mcp import MCP_SERVERS
             _mcp_cfg = {k: {kk: vv for kk, vv in v.items() if kk not in ("description", "install_cmd", "required_env", "env_aliases")}
                         for k, v in MCP_SERVERS.items()}
         except ImportError:
-            pass
+            _mcp_cfg = {}
+    # Explicit empty dict {} → no MCP servers (user explicitly disabled them)
     worker_env["MA_MCP_SERVERS"] = json.dumps(_mcp_cfg)
     worker_env["MA_BUDGET_LIMIT"] = str(cfg.get("budget_per_agent", cfg.get("budget_limit", 0)))
     worker_env["MA_TASK_TIMEOUT"] = str(cfg.get("task_timeout", 1800))  # 30 min default

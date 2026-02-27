@@ -13,7 +13,7 @@ try:
 except RuntimeError:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-loop.set_default_executor(ThreadPoolExecutor(max_workers=200))
+loop.set_default_executor(ThreadPoolExecutor(max_workers=40))
 
 # Initialize shared state (loads config, state, starts background threads)
 from hub.state import load_state, reset_session, start_background_threads, MA_DIR

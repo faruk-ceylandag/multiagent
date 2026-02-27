@@ -134,7 +134,8 @@ def health_detailed():
 
 @router.get("/config")
 def get_config():
-    return {"agents": ALL_AGENTS, "workspace": WORKSPACE, **_cfg}
+    filtered = {k: v for k, v in _cfg.items() if k not in ("hub_token", "credentials")}
+    return {"agents": ALL_AGENTS, "workspace": WORKSPACE, **filtered}
 
 @router.put("/config")
 def update_config(data: dict):
@@ -153,16 +154,21 @@ def update_config(data: dict):
                 updated[key] = value
         if updated:
             bump_version()
-            # Persist to multiagent.json
+            # Persist to multiagent.json (file-locked to prevent concurrent corruption)
             cfg_path = os.path.join(WORKSPACE, "multiagent.json") if WORKSPACE else ""
             if cfg_path:
                 try:
+                    import fcntl
                     existing = {}
-                    if os.path.exists(cfg_path):
-                        with open(cfg_path) as f:
-                            existing = json.load(f)
-                    existing.update(updated)
-                    with open(cfg_path, "w") as f:
+                    with open(cfg_path, "a+") as f:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                        f.seek(0)
+                        content = f.read()
+                        if content:
+                            existing = json.loads(content)
+                        existing.update(updated)
+                        f.seek(0)
+                        f.truncate()
                         json.dump(existing, f, indent=2)
                 except Exception as e:
                     logger.warning(f"Config write error: {e}")

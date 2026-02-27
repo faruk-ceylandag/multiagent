@@ -260,6 +260,13 @@ def _refresh_ecosystem(ctx):
         pass
     except Exception as e:
         log(ctx, f"⚠ Eco refresh: {e}")
+    # Refresh MCP server names from registry (may have changed since boot)
+    try:
+        from ecosystem.mcp.setup_mcp import MCP_SERVERS
+        _mcp_names = set(MCP_SERVERS.keys())
+        ctx._ECO_MCP_NAMES = _mcp_names | {f"mcp__{n}" for n in _mcp_names}
+    except ImportError:
+        pass
 
 
 def _process_ecosystem_updates(ctx, msgs):
@@ -1022,15 +1029,8 @@ while True:
                     ctx.current_task_id = str(result["id"])
                     log(ctx, f"📌 Task #{ctx.current_task_id} created in kanban")
 
-        # Reviewer/QA agents must NOT change the original (parent) task's status —
-        # they submit verdicts via /tasks/{tid}/review or set status via curl.
-        # Reviewers DO set their own subtask to in_progress.
-        _REVIEWER_QA_NAMES = {"reviewer-logic", "reviewer-style", "reviewer-arch", "qa"}
-        _is_reviewer_or_qa = ctx.AGENT_NAME in _REVIEWER_QA_NAMES
-        if ctx.current_task_id and not _is_reviewer_or_qa:
-            update_task_status(ctx, ctx.current_task_id, "in_progress")
-        elif ctx.current_task_id and (ctx.AGENT_NAME.startswith("reviewer-") or ctx.AGENT_NAME in {"qa"}):
-            # Reviewer/QA: set own task to in_progress
+        # All agents set their own task to in_progress (reviewers/QA set their subtask, devs set main task)
+        if ctx.current_task_id:
             update_task_status(ctx, ctx.current_task_id, "in_progress")
         ctx.reset_eco_tracking()
         _refresh_ecosystem(ctx)
@@ -1144,8 +1144,12 @@ while True:
         if _is_architect:
             roster = get_agent_roster(ctx)
         else:
-            from hub.state import ALL_AGENTS
-            roster = f"\nTEAM: {', '.join(ALL_AGENTS)}"
+            try:
+                _cfg_data = hub_get(ctx, "/config")
+                _team_names = _cfg_data.get("agents", []) if isinstance(_cfg_data, dict) else []
+                roster = f"\nTEAM: {', '.join(_team_names)}"
+            except Exception:
+                roster = ""
 
         # ── Token optimization: filtered project context ──
         project_dir = f"{ctx.WORKSPACE}/{ctx.current_project}" if ctx.current_project else ctx.WORKSPACE
@@ -1535,6 +1539,25 @@ RULES:
     Check code quality, error handling, test coverage, security. Report result to hub.{{branch_info}}{{hints}}
 {{learned_patterns}}""")
 
+        # ── File plan: submit intended files for conflict detection (BEFORE render_template so lock_ctx is complete) ──
+        if is_task and ctx.current_project and not _is_architect:
+            try:
+                _file_plan = _analyze_likely_files(ctx, task_text, ctx.current_project)
+                if _file_plan:
+                    _conflict_check = hub_post(ctx, "/files/check-conflicts", {
+                        "agent_name": ctx.AGENT_NAME, "files": _file_plan,
+                    })
+                    if _conflict_check and _conflict_check.get("has_conflicts"):
+                        for c in _conflict_check.get("conflicts", [])[:3]:
+                            log(ctx, f"⚠ File conflict: {', '.join(c.get('conflicting_files', [])[:3])} (by {c.get('agent', '?')})")
+                            lock_ctx += f"\n⚠️ FILE CONFLICT: {', '.join(c.get('conflicting_files', [])[:3])} planned by {c.get('agent', '?')} — avoid editing these."
+                    hub_post(ctx, "/files/plan", {
+                        "agent_name": ctx.AGENT_NAME, "files": _file_plan,
+                        "task_id": ctx.current_task_id or "",
+                    })
+            except Exception:
+                pass
+
         prompt = render_template(task_tpl, messages=mtxt, workspace=ctx.WORKSPACE, hub=ctx.HUB_URL,
                                  agent=ctx.AGENT_NAME, role_ctx=role_ctx, branch_info=branch_info,
                                  roster=roster, project_ctx=project_ctx, mcp_tools=mcp_ctx,
@@ -1564,32 +1587,6 @@ RULES:
             if _cache_parts:
                 prompt += "\n\n" + "\n\n".join(_cache_parts)
 
-        # ── File plan: submit intended files for conflict detection ──
-        if is_task and ctx.current_project and not _is_architect:
-            try:
-                _file_plan = _analyze_likely_files(ctx, task_text, ctx.current_project)
-                if _file_plan:
-                    _conflict_check = hub_post(ctx, "/files/check-conflicts", {
-                        "agent_name": ctx.AGENT_NAME, "files": _file_plan,
-                    })
-                    if _conflict_check and _conflict_check.get("has_conflicts"):
-                        for c in _conflict_check.get("conflicts", [])[:3]:
-                            log(ctx, f"⚠ File conflict: {', '.join(c.get('conflicting_files', [])[:3])} (by {c.get('agent', '?')})")
-                            lock_ctx += f"\n⚠️ FILE CONFLICT: {', '.join(c.get('conflicting_files', [])[:3])} planned by {c.get('agent', '?')} — avoid editing these."
-                    hub_post(ctx, "/files/plan", {
-                        "agent_name": ctx.AGENT_NAME, "files": _file_plan,
-                        "task_id": ctx.current_task_id or "",
-                    })
-            except Exception:
-                pass
-
-        # Capture inbox count before starting task (for mid-task inbox peek)
-        try:
-            _peek = hub_get(ctx, f"/messages/{ctx.AGENT_NAME}?peek=true")
-            ctx._inbox_count_at_task_start = _peek.get("count", 0) if isinstance(_peek, dict) else 0
-        except Exception:
-            ctx._inbox_count_at_task_start = 0
-        ctx._mid_task_notified = False
         # Save task summary for verify/follow-up calls (survives session resets)
         ctx._task_summary = task_text[:500]
         start_chat_handler(ctx, task_text[:500])
@@ -1838,8 +1835,7 @@ RULES:
 
         if is_task and task_ok and msgs:
             try:
-                extract_learning(ctx, msgs[0].get("content", "")[:200],
-                                call_claude_fn=lambda *a, **kw: call_claude(ctx, *a, **kw))
+                extract_learning(ctx, msgs[0].get("content", "")[:200])
             except Exception:
                 pass
 

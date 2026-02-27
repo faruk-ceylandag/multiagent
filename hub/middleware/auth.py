@@ -2,6 +2,7 @@
 
 import os
 import json
+import hmac
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -42,14 +43,15 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         if path in PUBLIC_PATHS or path.startswith("/static"):
             return await call_next(request)
 
-        # Check Authorization header
+        # Check Authorization header (constant-time comparison)
         auth = request.headers.get("Authorization", "")
-        if auth == f"Bearer {self.token}":
+        expected = f"Bearer {self.token}"
+        if hmac.compare_digest(auth.encode(), expected.encode()):
             return await call_next(request)
 
-        # Check cookie fallback (for dashboard)
+        # Check cookie fallback (for dashboard, constant-time comparison)
         cookie_token = request.cookies.get("hub_token", "")
-        if cookie_token == self.token:
+        if cookie_token and hmac.compare_digest(cookie_token.encode(), self.token.encode()):
             return await call_next(request)
 
         return JSONResponse(

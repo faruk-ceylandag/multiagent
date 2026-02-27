@@ -273,8 +273,11 @@ def track_ecosystem_use(ctx, tool_name, tool_input):
     """Track which ecosystem tools are being used by agents."""
     if not tool_name:
         return
-    # Track MCP tool usage for ecosystem learning
+    # Track MCP tool usage for ecosystem learning (deduplicate per task)
     if tool_name.startswith("mcp__"):
+        if tool_name in ctx._eco_reported:
+            return
+        ctx._eco_reported.add(tool_name)
         try:
             from .hub_client import hub_post
             hub_post(ctx, "/agents/learning", {
@@ -287,7 +290,7 @@ def track_ecosystem_use(ctx, tool_name, tool_input):
             pass
 
 
-def extract_learning(ctx, task_summary, call_claude_fn=None):
+def extract_learning(ctx, task_summary):
     """Extract learnings from completed task and submit to hub."""
     if not task_summary:
         return

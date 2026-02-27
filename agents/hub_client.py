@@ -1,12 +1,36 @@
 """agents/hub_client.py — Hub API communication (post, get, msg, status) with resilience."""
 import json, time, os as _os
+import http.client
 from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+from urllib.parse import urlparse
 
 # Track hub connectivity for graceful degradation
 _hub_failures = 0
 _hub_last_ok = 0
 _HUB_MAX_FAILURES = 10  # After this many consecutive failures, log warning
 _hub_last_recovery_attempt = 0
+
+# Connection pool: reuse TCP connections to hub
+_conn_pool = {}  # host:port → HTTPConnection
+
+def _get_conn(hub_url):
+    """Get or create a persistent HTTP connection to the hub."""
+    parsed = urlparse(hub_url)
+    key = f"{parsed.hostname}:{parsed.port or 80}"
+    conn = _conn_pool.get(key)
+    if conn:
+        try:
+            # Test if connection is still alive
+            conn.request("HEAD", "/health")
+            conn.getresponse().read()
+            return conn
+        except Exception:
+            try: conn.close()
+            except Exception: pass
+    conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=5)
+    _conn_pool[key] = conn
+    return conn
 
 
 def _get_auth_headers():
@@ -43,12 +67,21 @@ def hub_post(ctx, path, data, retries=1, timeout=5):
             body = json.dumps(data).encode()
             headers = {"Content-Type": "application/json"}
             headers.update(_get_cached_auth())
-            req = Request(f"{ctx.HUB_URL}{path}", data=body, headers=headers)
-            result = json.loads(urlopen(req, timeout=timeout).read())
+            # Try pooled connection first, fall back to urlopen
+            try:
+                conn = _get_conn(ctx.HUB_URL)
+                conn.request("POST", path, body=body, headers=headers)
+                resp = conn.getresponse()
+                result = json.loads(resp.read())
+            except Exception:
+                # Fallback: new connection via urlopen
+                _conn_pool.pop(f"{urlparse(ctx.HUB_URL).hostname}:{urlparse(ctx.HUB_URL).port or 80}", None)
+                req = Request(f"{ctx.HUB_URL}{path}", data=body, headers=headers)
+                result = json.loads(urlopen(req, timeout=timeout).read())
             _hub_failures = 0
             _hub_last_ok = time.time()
             return result
-        except Exception:
+        except (URLError, HTTPError, OSError, ConnectionError, TimeoutError):
             _hub_failures += 1
             if attempt < retries:
                 time.sleep(1)
@@ -85,7 +118,7 @@ def hub_get(ctx, path, retries=1):
             _hub_failures = 0
             _hub_last_ok = time.time()
             return result
-        except Exception:
+        except (URLError, HTTPError, OSError, ConnectionError, TimeoutError):
             _hub_failures += 1
             if attempt < retries:
                 time.sleep(1)

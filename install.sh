@@ -176,7 +176,7 @@ except: print('  Hub not running')
     ;;
   kill|shutdown)
     echo "  Stopping all..."
-    pkill -f "agent_worker.py" 2>/dev/null
+    pkill -f "agents.worker" 2>/dev/null
     pkill -f "hub_server:app" 2>/dev/null
     pkill -f "start.py" 2>/dev/null
     echo "  ✓ All stopped"

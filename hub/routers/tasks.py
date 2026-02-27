@@ -9,10 +9,10 @@ from hub.state import (
     analytics_log, MAX_ANALYTICS, add_activity, save_state, send_notification,
     messages, bump_version, pending_plans, logger, file_locks,
     task_comments, task_reviews, HIDDEN_AGENTS, STATUS_MIGRATION, MAX_REWORK_LOOPS,
-    _cfg,
+    MAX_QA_REWORK_LOOPS, _cfg,
 )
 
-MAX_REWORK_ITERATIONS = 5
+MAX_REWORK_ITERATIONS = MAX_QA_REWORK_LOOPS  # Alias for backward compat
 _QA_AGENT_HINTS = {"qa", "test", "tester", "quality"}
 
 router = APIRouter(tags=["tasks"])

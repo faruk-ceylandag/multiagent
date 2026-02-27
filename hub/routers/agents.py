@@ -14,6 +14,38 @@ from hub.state import (
 
 router = APIRouter(tags=["agents"])
 
+# ── Shared intent classification patterns (used by detect_route and _heuristic_intent) ──
+_CHAT_PATTERNS = [
+    r'^(hi|hello|hey|merhaba|selam|naber|nas\u0131l)',
+    r'^(thanks|te\u015fekk\u00fcr|sa\u011fol|eyvallah|ok|tamam|anlad\u0131m|evet|hay\u0131r)',
+    r'^(what|how|why|where|when|who|which|ne |nas\u0131l |neden |nerede |kim |hangi )',
+    r'\?$',
+    r'^(status|durum|ne oldu|neredesin|bitir?di mi|bitti mi)',
+    r'^(show|list|g\u00f6ster|listele|ka\u00e7 tane)',
+    r'^(stop|dur|cancel|iptal|bekle|wait)',
+]
+_TASK_PATTERNS = [
+    r'https?://',
+    r'\.(js|ts|py|css|html|jsx|tsx|vue|go|rs)\b',
+    r'^(fix|implement|create|build|deploy|refactor|update|add|remove|delete|write|make|d\u00fczelt|yap|ekle|olu\u015ftur|sil|g\u00fcncelle)',
+    r'(bug|feature|issue|ticket|PR|pull request|merge|branch)',
+    r'(deploy|release|test|lint|build|compile)',
+]
+
+
+def _classify_intent(msg):
+    """Classify message intent as 'task' or 'chat' using regex patterns."""
+    low = msg.lower().strip()
+    is_chat = any(re.search(p, low) for p in _CHAT_PATTERNS)
+    is_task = any(re.search(p, low) for p in _TASK_PATTERNS)
+    if is_task and not is_chat:
+        return "task"
+    elif is_chat and not is_task:
+        return "chat"
+    elif is_chat and is_task:
+        return "task" if ("http" in low or re.search(r'\.\w{2,4}\b', low)) else "chat"
+    return "chat"
+
 
 def _classify_task_type(desc):
     """Classify task description into a category."""
@@ -38,37 +70,7 @@ def _classify_task_type(desc):
 @router.get("/route")
 def detect_route(msg: str = ""):
     low = msg.lower().strip()
-
-    intent = "task"
-    _CHAT_PATTERNS = [
-        r'^(hi|hello|hey|merhaba|selam|naber|nas\u0131l)',
-        r'^(thanks|te\u015fekk\u00fcr|sa\u011fol|eyvallah|ok|tamam|anlad\u0131m|evet|hay\u0131r)',
-        r'^(what|how|why|where|when|who|which|ne |nas\u0131l |neden |nerede |kim |hangi )',
-        r'\?$',
-        r'^(status|durum|ne oldu|neredesin|bitir?di mi|bitti mi)',
-        r'^(show|list|g\u00f6ster|listele|ka\u00e7 tane)',
-        r'^(stop|dur|cancel|iptal|bekle|wait)',
-    ]
-    _TASK_PATTERNS = [
-        r'https?://',
-        r'\.(js|ts|py|css|html|jsx|tsx|vue|go|rs)\b',
-        r'^(fix|implement|create|build|deploy|refactor|update|add|remove|delete|write|make|d\u00fczelt|yap|ekle|olu\u015ftur|sil|g\u00fcncelle)',
-        r'(bug|feature|issue|ticket|PR|pull request|merge|branch)',
-        r'(deploy|release|test|lint|build|compile)',
-    ]
-
-    is_chat = any(re.search(p, low) for p in _CHAT_PATTERNS)
-    is_task = any(re.search(p, low) for p in _TASK_PATTERNS)
-
-    if is_task and not is_chat:
-        intent = "task"
-    elif is_chat and not is_task:
-        intent = "chat"
-    elif is_chat and is_task:
-        intent = "task" if ("http" in low or re.search(r'\.\w{2,4}\b', low)) else "chat"
-    else:
-        # Default to chat — only create tasks when clearly a task
-        intent = "chat"
+    intent = _classify_intent(msg)
 
     for a in ALL_AGENTS:
         if low.startswith(f"@{a} ") or low.startswith(f"{a}: ") or low.startswith(f"{a},") or low.startswith(f"{a} "):
@@ -178,32 +180,7 @@ _INTENT_CACHE_MAX = 100
 
 def _heuristic_intent(msg):
     """Fallback regex-based intent classification."""
-    low = msg.lower().strip()
-    _CHAT_PATTERNS = [
-        r'^(hi|hello|hey|merhaba|selam|naber|nas\u0131l)',
-        r'^(thanks|te\u015fekk\u00fcr|sa\u011fol|eyvallah|ok|tamam|anlad\u0131m|evet|hay\u0131r)',
-        r'^(what|how|why|where|when|who|which|ne |nas\u0131l |neden |nerede |kim |hangi )',
-        r'\?$',
-        r'^(status|durum|ne oldu|neredesin|bitir?di mi|bitti mi)',
-        r'^(show|list|g\u00f6ster|listele|ka\u00e7 tane)',
-        r'^(stop|dur|cancel|iptal|bekle|wait)',
-    ]
-    _TASK_PATTERNS = [
-        r'https?://',
-        r'\.(js|ts|py|css|html|jsx|tsx|vue|go|rs)\b',
-        r'^(fix|implement|create|build|deploy|refactor|update|add|remove|delete|write|make|d\u00fczelt|yap|ekle|olu\u015ftur|sil|g\u00fcncelle)',
-        r'(bug|feature|issue|ticket|PR|pull request|merge|branch)',
-        r'(deploy|release|test|lint|build|compile)',
-    ]
-    is_chat = any(re.search(p, low) for p in _CHAT_PATTERNS)
-    is_task = any(re.search(p, low) for p in _TASK_PATTERNS)
-    if is_task and not is_chat:
-        return "task"
-    elif is_chat and not is_task:
-        return "chat"
-    elif is_chat and is_task:
-        return "task" if ("http" in low or re.search(r'\.\w{2,4}\b', low)) else "chat"
-    return "chat"
+    return _classify_intent(msg)
 
 @router.get("/classify-intent")
 def classify_intent(msg: str = ""):

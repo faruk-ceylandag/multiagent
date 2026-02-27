@@ -204,6 +204,10 @@ def report_usage(ctx, u, model_name=""):
     # Set final token count (not +=) to avoid double-counting with live tracking
     pre = getattr(ctx, '_pre_call_tokens', ctx.session_tokens)
     ctx.session_tokens = pre + tin + tout
+    # Accumulate cost estimate for per-call budget enforcement
+    # Approximate pricing: input ~$3/M, output ~$15/M (opus ballpark)
+    call_cost = (tin * 3.0 + tout * 15.0) / 1_000_000
+    ctx._total_cost_so_far = getattr(ctx, '_total_cost_so_far', 0.0) + call_cost
     if tin or tout:
         _task_id = str(getattr(ctx, 'current_task_id', '') or '')
         hub_post(ctx, "/costs/log", {"agent_name": ctx.AGENT_NAME, "tokens_in": tin,
@@ -386,6 +390,8 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
             def read_stderr():
                 for line in proc.stderr:
                     stderr_lines.append(line.decode("utf-8", errors="replace").strip())
+                    if len(stderr_lines) > 500:
+                        del stderr_lines[:250]
 
             t = threading.Thread(target=read_stderr, daemon=True)
             t.start()
@@ -567,7 +573,14 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
             is_rate_limit = handle_rl(ctx, stderr_text, code)
 
             if is_rate_limit:
-                time.sleep(max(30, int(ctx.rate_limited_until - time.time())))
+                _rl_wait = max(30, int(ctx.rate_limited_until - time.time()))
+                for _ in range(_rl_wait):
+                    with ctx._stop_lock:
+                        if ctx._should_stop:
+                            log(ctx, "⛔ Stop signal during rate limit wait")
+                            ctx._should_stop = False
+                            return False
+                    time.sleep(1)
             elif is_connection_err:
                 base_wait = min(60, 10 * (2 ** (attempt - 1)))
                 wait = base_wait + random.uniform(0, 5)

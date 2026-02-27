@@ -51,7 +51,7 @@ def verify_loop(ctx, project, call_claude_fn):
     # Adaptive cycle count based on number of changed files
     max_cycles = 3
     if len(changed) <= 1:
-        max_cycles = 1
+        max_cycles = 2
     elif len(changed) <= 5:
         max_cycles = 2
 

@@ -58,6 +58,7 @@ class AgentContext:
         self._last_prompt_hash = ""
         self._task_start_time = 0
         self._last_output_lines = []
+        self._total_cost_so_far = 0.0
 
         # ── Ecosystem tracking (derived from MCP registry) ──
         try:
@@ -91,9 +92,8 @@ class AgentContext:
         # ── Task-based session map: same task reuses same session across rework ──
         self._session_map = {}  # task_id → session_id
 
-        # ── Inbox peek (mid-task notification) ──
-        self._inbox_count_at_task_start = 0
-        self._mid_task_notified = False
+        # ── Active patterns for this task (for post-task voting) ──
+        self._active_pattern_ids = []
 
         # ── Regex ──
         self._UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
@@ -106,9 +106,15 @@ class AgentContext:
         """Reset per-task tracking (call at start of each task)."""
         self._eco_reported = set()
 
+    _SESSION_MAP_MAX = 100
+
     def get_task_session(self, task_id):
         """Deterministic session ID: same task always resumes the same session."""
         if task_id not in self._session_map:
+            # LRU eviction: cap at _SESSION_MAP_MAX entries
+            if len(self._session_map) >= self._SESSION_MAP_MAX:
+                oldest = next(iter(self._session_map))
+                del self._session_map[oldest]
             namespace = uuid.UUID('12345678-1234-5678-1234-567812345678')
             self._session_map[task_id] = str(uuid.uuid5(namespace, f"{task_id}-{self.AGENT_NAME}"))
         return self._session_map[task_id]

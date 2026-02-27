@@ -207,6 +207,7 @@ task_comments: Dict[str, list] = {}    # {task_id_str: [{id, agent, text, timest
 task_reviews: Dict[str, dict] = {}     # {task_id_str: {agent_name: {verdict, comments, timestamp}}}
 _comment_counter = 0
 MAX_REWORK_LOOPS = 3                   # Max code_review rework cycles before auto-approve
+MAX_QA_REWORK_LOOPS = 5                # Max QA test rework cycles before failing task
 
 # ── Notifications ──
 notification_config = _cfg.get("notifications_webhook", {})
@@ -479,13 +480,13 @@ def _do_save():
                 task_snapshot = dict(tasks)
         # Bounded data structure cleanup — under lock to prevent race conditions
         with lock:
-            # Clean comments/reviews for completed tasks
-            active_tids = {str(k) for k, v in task_snapshot.items() if v.get("status") not in ("done", "failed", "cancelled")}
+            # Clean comments/reviews only for cancelled tasks (preserve done/failed for review history)
+            cancelled_tids = {str(k) for k, v in task_snapshot.items() if v.get("status") == "cancelled"}
             for tid_str in list(task_comments.keys()):
-                if tid_str not in active_tids:
+                if tid_str in cancelled_tids:
                     del task_comments[tid_str]
             for tid_str in list(task_reviews.keys()):
-                if tid_str not in active_tids:
+                if tid_str in cancelled_tids:
                     del task_reviews[tid_str]
             # Cap pending_plans
             if len(pending_plans) > MAX_PENDING_PLANS:

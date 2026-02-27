@@ -137,6 +137,7 @@ def git_rollback(ctx, project):
         if not pop_ok:
             log(ctx, f"⚠ Rollback stash pop failed: {pop_out[:80]}")
             git(ctx, ["stash", "drop"], d)
+            return False
         log(ctx, f"↩ rolled back {project}")
         return True
     return False
@@ -210,6 +211,7 @@ def git_branch(ctx, project, branch_name=None):
                 # Conflict — recover to clean state by accepting all incoming changes
                 log(ctx, f"⚠ Stash pop conflict — auto-resolving with incoming changes")
                 git(ctx, ["checkout", "--theirs", "."], d)
+                git(ctx, ["add", "."], d)
                 git(ctx, ["reset", "HEAD"], d)
             elif "no stash" in pop_lower:
                 pass  # Nothing to pop, fine
