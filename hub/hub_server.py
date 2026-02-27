@@ -8,7 +8,12 @@ from fastapi.staticfiles import StaticFiles
 
 # Increase default threadpool for sync endpoints (default=40, too low with many agents)
 from concurrent.futures import ThreadPoolExecutor
-asyncio.get_event_loop().set_default_executor(ThreadPoolExecutor(max_workers=200))
+try:
+    loop = asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+loop.set_default_executor(ThreadPoolExecutor(max_workers=200))
 
 # Initialize shared state (loads config, state, starts background threads)
 from hub.state import load_state, reset_session, start_background_threads, MA_DIR
