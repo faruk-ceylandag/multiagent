@@ -6,11 +6,11 @@ from datetime import datetime
 from collections import deque
 from fastapi import APIRouter
 
+import hub.state as _hub_state
 from hub.state import (
     lock, logger, ALL_AGENTS, WORKSPACE, _cfg, agents, pipeline,
     tasks, messages, changes, analytics_log, log_buffers, activity,
     rate_limited_agents, sse_clients, crash_log, bump_version,
-    _state_initialized,
 )
 
 router = APIRouter(tags=["health"])
@@ -53,7 +53,7 @@ def health():
 
     return {
         "status": status,
-        "initialized": _state_initialized,
+        "initialized": _hub_state._state_initialized,
         "agents": ALL_AGENTS,
         "workspace": WORKSPACE,
         "agent_summary": {"total": total, "active": active, "unresponsive": unresponsive},
