@@ -41,6 +41,7 @@ async def websocket_endpoint(ws: WebSocket):
     last_version = -1
     follow_agent = ""
     log_cursors = {}
+    last_tool_seq = -1
 
     try:
         while True:
@@ -77,9 +78,24 @@ async def websocket_endpoint(ws: WebSocket):
                         except Exception:
                             break
 
+            # Tool stream events
+            if follow_agent:
+                from hub.state import tool_events, tool_counters
+                if follow_agent in tool_events:
+                    new_events = []
+                    events_deque = tool_events[follow_agent]
+                    for evt in events_deque:
+                        if evt.get("_seq", 0) > last_tool_seq:
+                            new_events.append(evt)
+                            last_tool_seq = evt.get("_seq", 0)
+                    if new_events:
+                        await ws.send_json({"type": "tool_stream", "agent": follow_agent, "events": new_events[-50:]})
+
             # 3) Listen for client messages (1s timeout = poll frequency)
             try:
                 msg = await asyncio.wait_for(ws.receive_text(), timeout=1.0)
+                if len(msg) > 4096:
+                    continue  # Drop oversized messages
                 if msg == "ping":
                     await ws.send_text(json.dumps({"type": "pong"}))
                 else:

@@ -1,5 +1,9 @@
 """agents/mcp_manager.py — MCP server setup, reload, availability, and file watching."""
-import os, json, subprocess, threading, time, re
+import os
+import json
+import subprocess
+import threading
+import time
 from .log_utils import log
 from .credentials import load_credentials
 
@@ -160,7 +164,6 @@ def setup_mcp(ctx, extra_names=None):
             continue
 
         # Check if registered but stale (type or URL changed)
-        need_update = False
         if name in already:
             old = already[name]
             new_type = cfg.get("type", "stdio")
@@ -169,7 +172,6 @@ def setup_mcp(ctx, extra_names=None):
             old_url = old.get("url", "")
             if new_type != old_type or (new_url and new_url != old_url):
                 # Config changed — remove old, re-add
-                need_update = True
                 log(ctx, f"🔄 MCP {name}: {old_type}→{new_type}" + (f" url:{old_url}→{new_url}" if new_url != old_url else ""))
                 try:
                     subprocess.run(["claude", "mcp", "remove", "--scope", "user", name],
@@ -336,17 +338,21 @@ def reload_mcp(ctx):
 
 def get_available_mcp(ctx):
     """List MCP servers available to this agent."""
+    seen = set()
     servers = []
+    def _add(name):
+        if name not in seen:
+            seen.add(name)
+            servers.append(name)
     for name in ctx.MCP_SERVERS:
-        servers.append(name)
+        _add(name)
     # Check agent's settings.json
     sf = os.path.join(ctx.AGENT_CWD, ".claude", "settings.json")
     try:
         with open(sf) as f:
             s = json.load(f)
         for name in s.get("mcpServers", {}):
-            if name not in servers:
-                servers.append(name)
+            _add(name)
     except (OSError, json.JSONDecodeError):
         pass
     # Check .claude.json (claude mcp add writes here) — include user-level
@@ -357,8 +363,7 @@ def get_available_mcp(ctx):
                 with open(cj) as f:
                     cjd = json.load(f)
                 for name in cjd.get("mcpServers", {}):
-                    if name not in servers:
-                        servers.append(name)
+                    _add(name)
             except (OSError, json.JSONDecodeError):
                 pass
     # Check .mcp.json files
@@ -370,8 +375,7 @@ def get_available_mcp(ctx):
                     with open(mf) as f:
                         mc = json.load(f)
                     for name in mc.get("mcpServers", mc.get("servers", {})):
-                        if name not in servers:
-                            servers.append(name)
+                        _add(name)
                 except (OSError, json.JSONDecodeError):
                     pass
     return servers
@@ -485,6 +489,36 @@ def adopt_project_mcp(ctx, project_dir):
             json.dump(agent_cfg, f, indent=2)
     except Exception as e:
         log(ctx, f"MCP adopt error: {e}")
+
+
+def check_mcp_health(ctx, needed_names, timeout=3):
+    """Quick connectivity check for MCP servers. Returns set of healthy server names."""
+    if not needed_names:
+        return set()
+    healthy = set()
+    try:
+        from ecosystem.mcp.setup_mcp import MCP_SERVERS as REGISTRY
+    except ImportError:
+        REGISTRY = {}
+    for name in needed_names:
+        spec = REGISTRY.get(name, {})
+        if spec.get("type") in ("http", "sse") and spec.get("url"):
+            try:
+                from urllib.request import urlopen
+                urlopen(spec["url"], timeout=timeout)
+                healthy.add(name)
+            except Exception:
+                log(ctx, f"⚠ MCP {name} unreachable ({spec.get('url', '')[:60]})")
+        elif spec.get("command"):
+            import shutil
+            if shutil.which(spec["command"]):
+                healthy.add(name)
+            else:
+                log(ctx, f"⚠ MCP {name}: command '{spec['command']}' not found")
+        else:
+            # No spec or unknown type — assume healthy (stdio servers are local)
+            healthy.add(name)
+    return healthy
 
 
 def start_mcp_watcher(ctx):

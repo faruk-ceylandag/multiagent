@@ -124,10 +124,10 @@ function connectWebSocket() {
         if (!lines.length) return;
         if (!logLines[agent]) logLines[agent] = [];
         logLines[agent].push(...lines);
-        if (logLines[agent].length > 3000) logLines[agent] = logLines[agent].slice(-2000);
-        // Total log line limit across all agents: 50K
+        if (logLines[agent].length > 1500) logLines[agent] = logLines[agent].slice(-1000);
+        // Total log line limit across all agents: 15K
         let totalLines = Object.values(logLines).reduce((sum, arr) => sum + arr.length, 0);
-        if (totalLines > 50000) {
+        if (totalLines > 15000) {
           // Trim oldest logs from agents not currently selected
           for (const [a, lines] of Object.entries(logLines)) {
             if (a !== sel && lines.length > 500) {
@@ -136,6 +136,8 @@ function connectWebSocket() {
           }
         }
         if (tab === 'logs' && sel === agent) appendLogLines(lines);
+      } else if (msg.type === 'tool_stream' && msg.agent && msg.events) {
+        if (tab === 'logs' && sel === msg.agent) appendToolEvents(msg.events);
       }
     } catch {}
   };
@@ -589,6 +591,33 @@ function appendLogLines(lines){
   while(el.children.length>3000)el.removeChild(el.firstChild);
   if(atBot)el.scrollTop=el.scrollHeight;
 }
+
+// ── Tool Stream (1D) ──
+let _toolStreamEvents = {}; // {agentName: [{type, tool, detail, timestamp}]}
+const _toolBadgeColors = {Read:'var(--cyan)',Edit:'var(--yellow)',Write:'var(--green)',Bash:'var(--red)',Grep:'var(--purple,#a855f7)',Glob:'var(--orange,#f97316)',WebFetch:'var(--blue)',Task:'var(--ac)'};
+
+function appendToolEvents(events) {
+  const el = document.querySelector('.tool-stream');
+  if (!el) return;
+  const atBot = el.parentElement && (el.parentElement.scrollHeight - el.parentElement.scrollTop - el.parentElement.clientHeight < 60);
+  for (const ev of events) {
+    const div = document.createElement('div');
+    div.className = 'tool-stream-event';
+    const color = _toolBadgeColors[ev.tool] || 'var(--fg3)';
+    div.innerHTML = `<span class="tool-badge" style="background:${color};color:#000">${esc(ev.tool || ev.type)}</span>
+      <span style="color:var(--fg2)">${esc((ev.detail || '').substring(0, 120))}</span>
+      <span style="font-size:9px;color:var(--fg3);margin-left:auto">${ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : ''}</span>`;
+    el.appendChild(div);
+  }
+  while (el.children.length > 200) el.removeChild(el.firstChild);
+  if (atBot && el.parentElement) el.parentElement.scrollTop = el.parentElement.scrollHeight;
+}
+
+function renderToolStreamArea() {
+  // Returns HTML for the tool stream container shown below logs
+  return '<div class="tool-stream" style="max-height:120px;overflow-y:auto;border-top:1px solid var(--border)"></div>';
+}
+
 // ── Call grouping: collapse ▶...◼ blocks ──
 function buildGroupedHtml(lines){
   let html='',buf=[],hdr='';
@@ -749,7 +778,7 @@ function renderPanel(){
   const p=$('panel');if(!p)return;
   ({logs:renderLogs,tasks:renderTasks,inbox:renderInbox,review:renderReview,
     analytics:renderAnalytics,activity:renderActivity,locks:renderLocks,
-    git:renderGit,tests:renderTests,alerts:renderAlerts})[tab]?.(p);
+    git:renderGit,tests:renderTests,alerts:renderAlerts,timeline:renderTimeline})[tab]?.(p);
 }
 function updateLogHeader() {
   // Update header elements in-place without full re-render (preserves open <details> blocks)
@@ -869,7 +898,8 @@ function renderLogs(p){
     <button class="log-merge-btn" onclick="_hideHubNoise=!_hideHubNoise;renderPanel()" title="Toggle hub noise filter">${_hideHubNoise?'🔇':'📡'}</button>
     <button class="log-merge-btn" onclick="downloadLog('${escAttr(sel)}')" title="Download log">💾</button></div>
   ${liveStats}
-  <div class="log-area${_compactLogs?' compact':''}"></div>`;
+  <div class="log-area${_compactLogs?' compact':''}"></div>
+  ${isWorking ? renderToolStreamArea() : ''}`;
   const la=p.querySelector('.log-area');
   if(la){
     const frag=document.createDocumentFragment();
@@ -961,7 +991,7 @@ async function renderTests(p) {
 
 // ── Alerts ──
 let _alertFilter = 'all';
-function renderAlerts(p) {
+async function renderAlerts(p) {
   const alerts = [];
   // Build alerts from current data
   const agents = data.agents || {};
@@ -992,7 +1022,9 @@ function renderAlerts(p) {
     badge.textContent=total;
     badge.style.background=errCount?'var(--red)':'var(--yellow)';
   }
-  if(!alerts.length){p.innerHTML='<div class="empty-state">All systems normal</div>';return;}
+  // Fetch circuit breaker status async
+  const circuitHtml = await renderCircuitStatus();
+  if(!alerts.length && !circuitHtml){p.innerHTML='<div class="empty-state">All systems normal</div>';return;}
   const sevIcon={error:'🔴',warn:'🟡',info:'🔵'};
   const sevColor={error:'var(--red)',warn:'var(--yellow)',info:'var(--fg3)'};
   p.innerHTML=`<div class="flex-center flex-wrap gap-8 mb-12">
@@ -1001,6 +1033,7 @@ function renderAlerts(p) {
     <button class="tab-btn${_alertFilter==='error'?' active':''}" onclick="_alertFilter='error';renderAlerts($('panel'))">Errors (${errCount})</button>
     <button class="tab-btn${_alertFilter==='warn'?' active':''}" onclick="_alertFilter='warn';renderAlerts($('panel'))">Warnings (${warnCount})</button>
   </div>
+  ${circuitHtml || ''}
   <div style="display:flex;flex-direction:column;gap:6px">${filtered.map(a=>`
     <div class="card" style="padding:8px 12px;border-left:3px solid ${sevColor[a.severity]}">
       <div class="flex-between"><div class="flex-center gap-6">
@@ -1057,11 +1090,11 @@ function renderTasks(p){
     <span style="font-size:10px;color:var(--fg3)">${tasks.length}/${allTasks.length}</span>
   </div>
   <div class="kanban">${Object.entries(cols).map(([status,items])=>`
-    <div class="kanban-col"><div class="kanban-title">${statusIcon(status)} ${status.replace('_',' ')} <span class="kanban-count">${items.length}</span></div>
-      ${items.map(t=>`<div class="task-card task-${t.status}" onclick="showTaskDetail(${t.id})" style="cursor:pointer">
+    <div class="kanban-col" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="dropTask(event,'${status}');this.classList.remove('drag-over')"><div class="kanban-title">${statusIcon(status)} ${status.replace('_',' ')} <span class="kanban-count">${items.length}</span></div>
+      ${items.map(t=>`<div class="task-card task-${t.status}" onclick="showTaskDetail(${t.id})" draggable="true" ondragstart="dragTask(event,${t.id},'${escAttr(t.status)}')" style="cursor:pointer">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <span><span class="task-id">#${t.id}</span> <span class="task-agent">${t.assigned_to||'?'}</span></span>
-          <span class="task-priority p${t.priority||5}">P${t.priority||5}</span>
+          <span style="display:flex;align-items:center;gap:3px"><span class="task-quality-slot" data-tid="${t.id}"></span><span class="task-priority p${t.priority||5}">P${t.priority||5}</span></span>
         </div>
         ${t.depends_on?.length?`<span class="task-deps">← #${t.depends_on.join(',#')}</span>`:''}
         ${t.created_by&&t.created_by!=='user'?`<span class="task-origin">via ${t.created_by}</span>`:''}
@@ -1072,6 +1105,12 @@ function renderTasks(p){
           ${t.status==='created'?`<button class="task-btn task-start" onclick="assignTask(${t.id})">▶ Start</button>`:''}
           ${t.status==='in_progress'?`<button class="task-btn task-cancel" onclick="cancelTask(${t.id})">✗ Cancel</button>`:''}
           ${['done','failed','cancelled'].includes(t.status)?`<button class="task-btn" style="background:var(--cyan);color:#000" onclick="retryTask(${t.id},'${escAttr(t.assigned_to)}')">↻ Retry</button>`:''}
+        </div>
+        <div class="task-quick-actions" onclick="event.stopPropagation()">
+          <button class="task-quick-btn" onclick="quickReassign(${t.id},'${escAttr(t.assigned_to||'')}')">↔ Reassign</button>
+          <button class="task-quick-btn" onclick="quickPriority(${t.id},${t.priority||5})">P${t.priority||5}</button>
+          <button class="task-quick-btn" onclick="quickComment(${t.id})">💬</button>
+          ${t.assigned_to?`<button class="task-quick-btn" onclick="selectAgent('${escAttr(t.assigned_to)}');switchTab('logs')">📋 Logs</button>`:''}
         </div></div>`).join('')}
     </div>`).join('')}</div>
   ${allTasks.some(t=>t.depends_on?.length)?`<div class="dep-graph"><h3>🔗 Dependency Graph</h3><canvas id="depCanvas" width="600" height="200"></canvas></div>`:''}`;
@@ -1082,9 +1121,17 @@ function renderTasks(p){
   if(_savedAgent){const el=$('newTaskAgent');if(el)el.value=_savedAgent;}
   if(_savedDeps){const el=$('newTaskDeps');if(el)el.value=_savedDeps;}
   if(_focusedInTask&&_focusedInTask.startsWith('newTask')){const el=$(_focusedInTask);if(el)el.focus();}
+  // Async-load quality badges for completed/done tasks
+  const doneTasks = tasks.filter(t => ['done','failed','code_review','in_testing','uat'].includes(t.status));
+  doneTasks.forEach(t => {
+    renderQualityBadge(t.id).then(html => {
+      const slot = p.querySelector(`.task-quality-slot[data-tid="${t.id}"]`);
+      if (slot && html) slot.innerHTML = html;
+    });
+  });
 }
 
-function statusIcon(s){return{created:'📋',assigned:'👤',in_progress:'⚙️',in_review:'🔍',done:'✅',failed:'❌',cancelled:'🚫'}[s]||'•';}
+function statusIcon(s){return{created:'📋',to_do:'📋',assigned:'👤',in_progress:'⚙️',code_review:'🔍',in_review:'🔍',in_testing:'🧪',uat:'👁️',done:'✅',failed:'❌',cancelled:'🚫'}[s]||'•';}
 
 function drawDepGraph(tasks){
   const canvas=$('depCanvas');if(!canvas)return;
@@ -1227,6 +1274,8 @@ async function showTaskDetail(id){
       <button class="modal-btn-ok" style="font-size:11px;padding:4px 10px;background:var(--green)" onclick="pushBranch('${escAttr(task.project)}')">Push</button>`:''}
     </div>`:''}
 
+    <div id="_taskDetailExtra"></div>
+
     <div class="modal-actions" style="flex-wrap:wrap;gap:6px">
       ${task.status==='created'?`<select id="_reassign" style="padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:11px">
         ${names.map(n=>`<option value="${esc(n)}"${n===task.assigned_to?' selected':''}>${esc(n)}</option>`).join('')}
@@ -1242,6 +1291,25 @@ async function showTaskDetail(id){
     </div>
   </div>`;
   document.body.appendChild(overlay);
+
+  // Async load extra panels: cost breakdown, quality, prediction
+  const extraEl = $('_taskDetailExtra');
+  if (extraEl) {
+    const [costHtml, predHtml, qualHtml] = await Promise.all([
+      renderTaskCost(id),
+      renderPrediction(id, task.status),
+      renderQualityBadge(id),
+    ]);
+    let extra = '';
+    if (qualHtml) {
+      // Insert quality badge next to task ID
+      const tidEl = overlay.querySelector('.task-id');
+      if (tidEl) tidEl.insertAdjacentHTML('afterend', qualHtml);
+    }
+    if (costHtml) extra += costHtml;
+    if (predHtml) extra += predHtml;
+    if (extra) extraEl.innerHTML = extra;
+  }
 }
 
 async function reassignTask(id,agent){
@@ -1860,8 +1928,8 @@ async function renderAnalytics(p){
         html+=connected.map(s=>`<div class="flex-center gap-8 py-4">
           <span style="font-size:14px">${s.icon}</span>
           <span class="text-green font-bold">${esc(s.name)}</span>
-          <span class="text-sm text-green">● Connected</span>
-          <button class="btn-sm task-cancel ml-auto" onclick="disconnectService('${escAttr(s.id)}')">Disconnect</button>
+          <span class="text-sm ${s.auth_type==='oauth_pending'?'text-yellow':'text-green'}">${s.auth_type==='oauth_pending'?'⚠ Auth Pending':'● Connected'}</span>
+          ${s.auth_type==='oauth_pending'?`<button class="btn-sm task-start ml-auto" onclick="showServiceWizard('${escAttr(s.id)}')">Authenticate</button>`:`<button class="btn-sm task-cancel ml-auto" onclick="disconnectService('${escAttr(s.id)}')">Disconnect</button>`}
         </div>`).join('');
       }
       if(available.length){
@@ -2002,25 +2070,33 @@ function renderServiceForm(overlay,svc){
         <span style="font-size:10px;color:var(--fg3)">MCP Authentication</span>
       </div>
     </div>
-    ${hasUrl?`<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px">
+    ${svc.auth_type?.startsWith('oauth')?`<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px">
+      <div style="font-size:11px;color:var(--fg2);margin-bottom:6px">Authenticate via CLI (opens browser for OAuth):</div>
+      <div style="background:var(--bg2,#1a1a2e);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:8px;font-family:monospace;font-size:11px;color:var(--cyan,#88c0d0);word-break:break-all;cursor:pointer;position:relative" onclick="navigator.clipboard.writeText('${esc(svc.mcp_cmd||'')}');this.querySelector('.copy-hint').textContent='Copied!';setTimeout(()=>this.querySelector('.copy-hint').textContent='Click to copy',1500)" title="Click to copy">
+        ${esc(svc.mcp_cmd||'')}
+        <span class="copy-hint" style="position:absolute;right:8px;top:8px;font-size:9px;color:var(--fg3);font-family:system-ui">Click to copy</span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        ${hasUrl?`<a href="${esc(svc.auth_url)}" target="_blank" rel="noopener" style="font-size:10px;color:var(--fg2);text-decoration:underline">Manage ${esc(svc.name)} account</a>`:''}
+        ${svc.docs?`<a href="${esc(svc.docs)}" target="_blank" rel="noopener" style="font-size:10px;color:var(--fg3)">Documentation</a>`:''}
+      </div>
+    </div>`:hasUrl?`<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px">
       <div style="font-size:11px;color:var(--fg2);margin-bottom:6px">Step 1: Open the authentication page</div>
       <a href="${esc(svc.auth_url)}" target="_blank" rel="noopener" class="modal-btn-ok" style="width:100%;display:block;text-align:center;text-decoration:none;box-sizing:border-box">
         🔐 Open ${esc(svc.name)} Auth Page
       </a>
-      ${svc.docs?`<a href="${esc(svc.docs)}" target="_blank" rel="noopener" style="font-size:9px;color:var(--fg3);display:block;margin-top:6px">📖 Documentation</a>`:''}
+      ${svc.docs?`<a href="${esc(svc.docs)}" target="_blank" rel="noopener" style="font-size:9px;color:var(--fg3);display:block;margin-top:6px">Documentation</a>`:''}
     </div>`:''}
     ${svc.setup_note?`<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin-bottom:14px;font-size:10px;color:var(--fg2);white-space:pre-line">${esc(svc.setup_note)}</div>`:''}
-    <div style="font-size:11px;color:var(--fg2);margin-bottom:8px">${hasUrl?'Step 2: Paste':'Enter'} your credentials below</div>
+    ${svc.auth_type!=='oauth'?`<div style="font-size:11px;color:var(--fg2);margin-bottom:8px">${hasUrl?'Step 2: Paste':'Enter'} your credentials below</div>`:''}
     ${svc.credentials.map(c=>`<div style="margin-bottom:10px">
       <label style="font-size:11px;color:var(--fg2);display:block;margin-bottom:3px">${esc(c.label)}</label>
       <input id="_svc_${escAttr(c.key)}" class="modal-input" type="${c.type||'text'}" placeholder="${esc(c.placeholder||c.help||'')}" autocomplete="off">
       ${c.help?`<div style="font-size:9px;color:var(--fg3);margin-top:2px">${esc(c.help)}</div>`:''}
     </div>`).join('')}
     <div class="modal-actions">
-      <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
-      <button class="modal-btn-ok" id="_svcSaveBtn">
-        ✓ Connect ${esc(svc.name)}
-      </button>
+      <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">${svc.auth_type?.startsWith('oauth')&&!svc.credentials.length?'Close':'Cancel'}</button>
+      ${svc.credentials.length?`<button class="modal-btn-ok" id="_svcSaveBtn">✓ Connect ${esc(svc.name)}</button>`:''}
     </div>
   </div>`;
   // Bind buttons with closures
@@ -2625,6 +2701,296 @@ async function dismissPlan(planId){
 }
 
 // ══════════════════════════════════
+//  QUICK ACTIONS (1A)
+// ══════════════════════════════════
+function quickReassign(id, current) {
+  const names = (data.agent_names || []).filter(n => !((data.agents || {})[n] || {}).hidden);
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  overlay.innerHTML = `<div class="modal-box" style="width:300px">
+    <h3 style="font-size:13px;margin-bottom:10px">Reassign Task #${id}</h3>
+    <select id="_qrAgent" class="modal-input">${names.map(n => `<option value="${escAttr(n)}"${n === current ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>
+    <div class="modal-actions">
+      <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+      <button class="modal-btn-ok" onclick="fetch(HUB+'/tasks/${id}',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({assigned_to:document.getElementById('_qrAgent').value})}).then(()=>{this.closest('.modal-overlay').remove();toast('Reassigned #${id}','success');poll()})">Reassign</button>
+    </div></div>`;
+  document.body.appendChild(overlay);
+}
+
+function quickPriority(id, current) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  overlay.innerHTML = `<div class="modal-box" style="width:260px">
+    <h3 style="font-size:13px;margin-bottom:10px">Priority #${id}</h3>
+    <select id="_qpPri" class="modal-input">${[1,3,5,8,10].map(p => `<option value="${p}"${p === current ? ' selected' : ''}>P${p}${p===1?' Critical':p===3?' High':p===5?' Normal':p===8?' Low':' Lowest'}</option>`).join('')}</select>
+    <div class="modal-actions">
+      <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+      <button class="modal-btn-ok" onclick="changePriority(${id},document.getElementById('_qpPri').value);this.closest('.modal-overlay').remove()">Set</button>
+    </div></div>`;
+  document.body.appendChild(overlay);
+}
+
+function quickComment(id) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  overlay.innerHTML = `<div class="modal-box" style="width:380px">
+    <h3 style="font-size:13px;margin-bottom:10px">Comment on #${id}</h3>
+    <textarea id="_qcText" class="modal-input" rows="3" placeholder="Add a comment..."></textarea>
+    <div class="modal-actions">
+      <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+      <button class="modal-btn-ok" onclick="const t=document.getElementById('_qcText').value.trim();if(!t)return;fetch(HUB+'/tasks/${id}/comments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent:'user',text:t})}).then(()=>{this.closest('.modal-overlay').remove();toast('Comment added','success')})">Post</button>
+    </div></div>`;
+  document.body.appendChild(overlay);
+  setTimeout(() => $('_qcText')?.focus(), 50);
+}
+
+// ══════════════════════════════════
+//  DRAG & DROP KANBAN (1B)
+// ══════════════════════════════════
+let _dragTaskId = null, _dragFromStatus = '';
+const _validDragTransitions = {
+  to_do: ['in_progress'],
+  in_progress: ['code_review', 'done', 'failed'],
+  code_review: ['in_progress', 'in_testing'],
+  in_testing: ['in_progress', 'uat'],
+  uat: ['done', 'in_progress'],
+  done: ['to_do'],
+  failed: ['to_do', 'in_progress'],
+};
+
+function dragTask(e, id, fromStatus) {
+  _dragTaskId = id;
+  _dragFromStatus = fromStatus;
+  e.dataTransfer.effectAllowed = 'move';
+  e.target.classList.add('dragging');
+  setTimeout(() => e.target.classList.remove('dragging'), 0);
+}
+
+async function dropTask(e, toStatus) {
+  e.preventDefault();
+  if (!_dragTaskId || toStatus === _dragFromStatus) return;
+  const valid = _validDragTransitions[_dragFromStatus] || [];
+  if (!valid.includes(toStatus)) {
+    toast(`Can't move from ${_dragFromStatus.replace('_',' ')} to ${toStatus.replace('_',' ')}`, 'warn');
+    return;
+  }
+  try {
+    await fetch(HUB + '/tasks/' + _dragTaskId, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({status: toStatus})
+    });
+    toast(`Task #${_dragTaskId} → ${toStatus.replace('_',' ')}`, 'success', 2000);
+    setTimeout(poll, 300);
+  } catch (err) {
+    toast('Move failed: ' + err, 'error');
+  }
+  _dragTaskId = null;
+}
+
+// ══════════════════════════════════
+//  GLOBAL SEARCH CMD+K (1C)
+// ══════════════════════════════════
+let _searchTimer = null, _searchIdx = 0, _searchResults = [];
+
+function openSearchPalette() {
+  // Remove existing
+  document.querySelector('.search-palette')?.remove();
+  const el = document.createElement('div');
+  el.className = 'search-palette';
+  el.onclick = e => { if (e.target === el) el.remove(); };
+  el.innerHTML = `<div class="search-box">
+    <input class="search-input" id="searchInput" placeholder="Search tasks, agents, activity..." autofocus>
+    <div class="search-results" id="searchResults"><div class="search-empty">Type to search...</div></div>
+    <div class="search-hint">${_mod}+K to toggle · ↑↓ to navigate · Enter to select · Esc to close</div>
+  </div>`;
+  document.body.appendChild(el);
+  const input = $('searchInput');
+  input.focus();
+  input.addEventListener('input', () => {
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(() => _doSearch(input.value.trim()), 200);
+  });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); _searchIdx = Math.min(_searchIdx + 1, _searchResults.length - 1); _highlightSearch(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); _searchIdx = Math.max(_searchIdx - 1, 0); _highlightSearch(); }
+    else if (e.key === 'Enter') { e.preventDefault(); _selectSearchResult(); }
+    else if (e.key === 'Escape') { el.remove(); }
+  });
+}
+
+async function _doSearch(q) {
+  if (!q || q.length < 2) {
+    $('searchResults').innerHTML = '<div class="search-empty">Type to search...</div>';
+    _searchResults = [];
+    return;
+  }
+  try {
+    _searchResults = await (await fetch(HUB + '/search?q=' + encodeURIComponent(q) + '&limit=15')).json();
+    _searchIdx = 0;
+    const box = $('searchResults');
+    if (!_searchResults.length) {
+      box.innerHTML = '<div class="search-empty">No results found</div>';
+      return;
+    }
+    box.innerHTML = _searchResults.map((r, i) =>
+      `<div class="search-result${i === 0 ? ' active' : ''}" data-idx="${i}" onclick="_searchIdx=${i};_selectSearchResult()">
+        <span class="search-result-type type-${r.type}">${r.type}</span>
+        <span class="search-result-title">${esc(r.title)}</span>
+        ${r.status ? `<span class="search-result-meta">${r.status}</span>` : ''}
+        ${r.agent ? `<span class="search-result-meta">${esc(r.agent)}</span>` : ''}
+      </div>`
+    ).join('');
+  } catch {
+    $('searchResults').innerHTML = '<div class="search-empty">Search error</div>';
+  }
+}
+
+function _highlightSearch() {
+  document.querySelectorAll('.search-result').forEach((el, i) => {
+    el.classList.toggle('active', i === _searchIdx);
+  });
+  // Scroll active into view
+  const active = document.querySelector('.search-result.active');
+  if (active) active.scrollIntoView({block: 'nearest'});
+}
+
+function _selectSearchResult() {
+  const r = _searchResults[_searchIdx];
+  if (!r) return;
+  document.querySelector('.search-palette')?.remove();
+  if (r.type === 'task') {
+    showTaskDetail(r.id);
+  } else if (r.type === 'agent') {
+    selectAgent(r.id);
+    switchTab('logs');
+  } else if (r.type === 'activity') {
+    switchTab('activity');
+  } else if (r.type === 'pattern') {
+    switchTab('analytics');
+  }
+}
+
+// ══════════════════════════════════
+//  TASK TIMELINE / GANTT (1E)
+// ══════════════════════════════════
+async function renderTimeline(p) {
+  p.innerHTML = '<div class="empty-state">Loading timeline...</div>';
+  try {
+    const tl = await (await fetch(HUB + '/tasks/timeline?limit=30')).json();
+    if (!tl.length) { p.innerHTML = '<div class="empty-state">No task data for timeline</div>'; return; }
+
+    // Find time range
+    let minTime = Infinity, maxTime = 0;
+    tl.forEach(t => {
+      const created = t.created_at ? new Date(t.created_at).getTime() : 0;
+      const completed = t.completed_at ? new Date(t.completed_at).getTime() : Date.now();
+      if (created && created < minTime) minTime = created;
+      if (completed > maxTime) maxTime = completed;
+    });
+    if (!minTime || minTime === Infinity) minTime = Date.now() - 3600000;
+    if (!maxTime || maxTime <= minTime) maxTime = minTime + 3600000;
+    const range = maxTime - minTime || 1;
+
+    const phaseColors = {to_do:'var(--fg3)',in_progress:'var(--blue)',code_review:'#a855f7',in_testing:'var(--yellow)',uat:'#3b82f6',done:'var(--green)',failed:'var(--red)'};
+
+    let rows = tl.map(t => {
+      const start = t.started_at ? new Date(t.started_at).getTime() : (t.created_at ? new Date(t.created_at).getTime() : minTime);
+      const end = t.completed_at ? new Date(t.completed_at).getTime() : Date.now();
+      const left = Math.max(0, ((start - minTime) / range) * 100);
+      const width = Math.max(2, ((end - start) / range) * 100);
+      const color = phaseColors[t.status] || 'var(--fg3)';
+      return `<div class="timeline-row" onclick="showTaskDetail(${t.id})" style="cursor:pointer">
+        <div class="timeline-label"><span class="task-id">#${t.id}</span> ${esc(t.agent || '?')}</div>
+        <div class="timeline-bar-area">
+          <div class="timeline-bar phase-${t.status}" style="left:${left}%;width:${width}%;background:${color}" title="${esc(t.description)}"></div>
+        </div>
+      </div>`;
+    }).join('');
+
+    const legend = Object.entries(phaseColors).map(([k,v]) =>
+      `<div class="timeline-legend-item"><div class="timeline-legend-dot" style="background:${v}"></div>${k.replace('_',' ')}</div>`
+    ).join('');
+
+    p.innerHTML = `<h3 class="text-lg text-muted mb-8">Task Timeline</h3>
+      <div class="timeline-legend">${legend}</div>
+      <div class="timeline-container">${rows}</div>`;
+  } catch (e) {
+    p.innerHTML = '<div class="empty-state">Error loading timeline</div>';
+  }
+}
+
+// ══════════════════════════════════
+//  CIRCUIT BREAKER DASHBOARD (3A)
+// ══════════════════════════════════
+async function renderCircuitStatus() {
+  try {
+    const circuits = await (await fetch(HUB + '/health/circuits')).json();
+    const entries = Object.entries(circuits);
+    if (!entries.length) return '';
+    return `<div style="margin-top:12px"><div style="font-size:11px;color:var(--fg3);margin-bottom:4px;font-weight:500">Circuit Breakers</div>
+      <div class="circuit-status">${entries.map(([k, cb]) =>
+        `<div class="circuit-chip circuit-${cb.state}">
+          <span>${esc(k)}</span>
+          <span style="font-weight:600">${cb.state}</span>
+          ${cb.failures ? `<span style="font-size:9px;opacity:0.7">(${cb.failures} fails)</span>` : ''}
+          ${cb.state === 'open' ? `<button class="task-quick-btn" onclick="event.stopPropagation();fetch(HUB+'/health/circuits/${encodeURIComponent(k)}/reset',{method:'POST'}).then(()=>{toast('Circuit reset','success');renderAlerts($('panel'))})">Reset</button>` : ''}
+        </div>`
+      ).join('')}</div></div>`;
+  } catch { return ''; }
+}
+
+// ══════════════════════════════════
+//  TASK COST BREAKDOWN (3C)
+// ══════════════════════════════════
+async function renderTaskCost(tid) {
+  try {
+    const c = await (await fetch(HUB + '/costs/task/' + tid)).json();
+    if (!c || (!c.tokens_in && !c.tokens_out)) return '';
+    const cost = c.cost || 0;
+    return `<div style="margin-top:10px"><div style="font-size:10px;color:var(--fg3);margin-bottom:4px;font-weight:500">Cost Breakdown</div>
+      <div class="cost-grid">
+        <div class="cost-cell"><div class="cost-label">Tokens In</div><div class="cost-value">${formatTokens(c.tokens_in)}</div></div>
+        <div class="cost-cell"><div class="cost-label">Tokens Out</div><div class="cost-value">${formatTokens(c.tokens_out)}</div></div>
+        <div class="cost-cell"><div class="cost-label">Est. Cost</div><div class="cost-value">${formatCost(cost)}</div></div>
+        ${c.opus_tokens ? `<div class="cost-cell"><div class="cost-label">Opus</div><div class="cost-value" style="color:var(--ac)">${formatTokens(c.opus_tokens)}</div></div>` : ''}
+        ${c.sonnet_tokens ? `<div class="cost-cell"><div class="cost-label">Sonnet</div><div class="cost-value" style="color:var(--blue)">${formatTokens(c.sonnet_tokens)}</div></div>` : ''}
+        ${c.haiku_tokens ? `<div class="cost-cell"><div class="cost-label">Haiku</div><div class="cost-value" style="color:var(--green)">${formatTokens(c.haiku_tokens)}</div></div>` : ''}
+      </div></div>`;
+  } catch { return ''; }
+}
+
+// ══════════════════════════════════
+//  PERFORMANCE PREDICTIONS (4B)
+// ══════════════════════════════════
+async function renderPrediction(tid, status) {
+  if (['done', 'failed', 'cancelled'].includes(status)) return '';
+  try {
+    const p = await (await fetch(HUB + '/tasks/' + tid + '/predict')).json();
+    if (!p || p.error || (!p.estimated_seconds && !p.estimated_cost)) return '';
+    const durStr = p.estimated_seconds ? (p.estimated_seconds >= 60 ? Math.floor(p.estimated_seconds / 60) + 'm ' + (p.estimated_seconds % 60) + 's' : p.estimated_seconds + 's') : '?';
+    return `<div class="prediction-panel">
+      <div><div class="pred-label">Est. Duration</div><div class="pred-value">${durStr}</div></div>
+      ${p.estimated_cost ? `<div><div class="pred-label">Est. Cost</div><div class="pred-value">${formatCost(p.estimated_cost)}</div></div>` : ''}
+      <div><span class="pred-confidence ${p.confidence}">${p.confidence}</span><span style="font-size:9px;color:var(--fg3);margin-left:4px">based on ${p.basis} similar</span></div>
+    </div>`;
+  } catch { return ''; }
+}
+
+// ══════════════════════════════════
+//  QUALITY SCORE (4C)
+// ══════════════════════════════════
+async function renderQualityBadge(tid) {
+  try {
+    const q = await (await fetch(HUB + '/tasks/' + tid + '/quality')).json();
+    if (!q || q.error) return '';
+    return `<span class="quality-badge quality-${q.grade}" title="Quality: ${q.score}/100">${q.grade}</span>`;
+  } catch { return ''; }
+}
+
+// ══════════════════════════════════
 //  INIT
 // ══════════════════════════════════
 const saved=localStorage.getItem('ma-theme');
@@ -2652,8 +3018,8 @@ document.addEventListener('keydown',e=>{
   }
   // Ctrl/Cmd+O → Expanded editor
   if(e.key==='o'&&(e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey){e.preventDefault();openEditor();}
-  // Ctrl/Cmd+K → Focus command input
-  if(e.key==='k'&&(e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey){e.preventDefault();const ci=$('cmdInput');if(ci)ci.focus();}
+  // Ctrl/Cmd+K → Global search palette
+  if(e.key==='k'&&(e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey){e.preventDefault();const existing=document.querySelector('.search-palette');if(existing)existing.remove();else openSearchPalette();}
   // Number keys 1-9 → Select agent (only when not in input)
   if(!inInput&&e.key>='1'&&e.key<='9'&&!e.metaKey&&!e.ctrlKey&&!e.altKey){
     const names=(data.agent_names||[]).filter(n=>!((data.agents||{})[n]||{}).hidden);

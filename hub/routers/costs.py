@@ -32,6 +32,28 @@ def log_usage(entry: CostEntry):
         else:
             c["sonnet_in"] = c.get("sonnet_in", 0) + entry.tokens_in
             c["sonnet_out"] = c.get("sonnet_out", 0) + entry.tokens_out
+        # Track per-task costs
+        task_id = getattr(entry, '__dict__', {}).get('task_id', '')
+        if not task_id:
+            task_id = ''
+        if task_id:
+            task_key = f"_task_{task_id}"
+            if task_key not in usage_log:
+                usage_log[task_key] = {"tokens_in": 0, "tokens_out": 0, "requests": 0}
+            usage_log[task_key]["tokens_in"] = usage_log[task_key].get("tokens_in", 0) + entry.tokens_in
+            usage_log[task_key]["tokens_out"] = usage_log[task_key].get("tokens_out", 0) + entry.tokens_out
+            usage_log[task_key]["requests"] = usage_log[task_key].get("requests", 0) + 1
+            # Model breakdown for tasks
+            model_lower = (entry.model or "sonnet").lower()
+            if "opus" in model_lower:
+                usage_log[task_key]["opus_in"] = usage_log[task_key].get("opus_in", 0) + entry.tokens_in
+                usage_log[task_key]["opus_out"] = usage_log[task_key].get("opus_out", 0) + entry.tokens_out
+            elif "haiku" in model_lower:
+                usage_log[task_key]["haiku_in"] = usage_log[task_key].get("haiku_in", 0) + entry.tokens_in
+                usage_log[task_key]["haiku_out"] = usage_log[task_key].get("haiku_out", 0) + entry.tokens_out
+            else:
+                usage_log[task_key]["sonnet_in"] = usage_log[task_key].get("sonnet_in", 0) + entry.tokens_in
+                usage_log[task_key]["sonnet_out"] = usage_log[task_key].get("sonnet_out", 0) + entry.tokens_out
         save_state()
     return {"status": "ok"}
 
@@ -77,3 +99,25 @@ def get_total_budget():
         "remaining": max(0, BUDGET_LIMIT - total) if BUDGET_LIMIT else 999,
         "by_agent": by_agent,
     }
+
+
+@router.get("/costs/task/{tid}")
+def get_task_cost(tid: int):
+    """Get cost breakdown for a specific task."""
+    task_key = f"_task_{tid}"
+    u = usage_log.get(task_key, {})
+    if not u:
+        return {"task_id": tid, "tokens_in": 0, "tokens_out": 0, "cost": 0}
+    from hub.state import _PRICING
+    ti, to = u.get("tokens_in", 0), u.get("tokens_out", 0)
+    si, so = u.get("sonnet_in", 0), u.get("sonnet_out", 0)
+    oi, oo = u.get("opus_in", 0), u.get("opus_out", 0)
+    hi, ho = u.get("haiku_in", 0), u.get("haiku_out", 0)
+    cost = ((si/1e6)*_PRICING["sonnet_in"] + (so/1e6)*_PRICING["sonnet_out"] +
+            (oi/1e6)*_PRICING["opus_in"] + (oo/1e6)*_PRICING["opus_out"] +
+            (hi/1e6)*_PRICING["haiku_in"] + (ho/1e6)*_PRICING["haiku_out"])
+    if not si and not so and not oi and not oo:
+        cost = (ti*0.7/1e6)*_PRICING["opus_in"] + (to*0.7/1e6)*_PRICING["opus_out"] + (ti*0.3/1e6)*_PRICING["sonnet_in"] + (to*0.3/1e6)*_PRICING["sonnet_out"]
+    return {"task_id": tid, "tokens_in": ti, "tokens_out": to, "requests": u.get("requests", 0),
+            "sonnet_tokens": si+so, "opus_tokens": oi+oo, "haiku_tokens": hi+ho,
+            "cost": round(cost, 4)}

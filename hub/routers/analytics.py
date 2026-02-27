@@ -11,6 +11,7 @@ from hub.state import (
     usage_log, file_locks, messages, changes, activity, analytics_log,
     rate_limited_agents, sse_clients, agent_progress, agent_specialization,
     agent_learnings, test_results, auto_scale_config, user_sessions,
+    pattern_registry,
     BUDGET_LIMIT, calc_agent_cost, calc_total_cost, git_cmd, save_state,
     get_dashboard_snapshot,
 )
@@ -276,3 +277,116 @@ def get_metrics():
         "total_requests": sum(request_counts.values()),
         "total_errors": sum(error_counts.values()),
     }
+
+
+@router.get("/search")
+def global_search(q: str = "", limit: int = 20):
+    """Global search across tasks, agents, activity, patterns."""
+    if not q or len(q) < 2:
+        return []
+    q_lower = q.lower()
+    results = []
+    # Search tasks
+    for tid, t in dict(tasks).items():
+        if t.get("_is_review_subtask"):
+            continue
+        desc = (t.get("description") or "").lower()
+        agent = (t.get("assigned_to") or "").lower()
+        if q_lower in desc or q_lower in str(tid) or q_lower in agent:
+            results.append({"type": "task", "id": tid, "title": f"#{tid} {t.get('description', '')[:80]}", "status": t.get("status"), "agent": t.get("assigned_to")})
+    # Search agents
+    for name in ALL_AGENTS:
+        if name in HIDDEN_AGENTS:
+            continue
+        if q_lower in name.lower():
+            a = agents.get(name, {})
+            results.append({"type": "agent", "id": name, "title": name, "status": a.get("pipeline", "offline")})
+    # Search activity
+    for a in list(activity)[-200:]:
+        preview = (a.get("preview") or "").lower()
+        if q_lower in preview:
+            results.append({"type": "activity", "id": a.get("time", ""), "title": a.get("preview", "")[:80], "time": a.get("time")})
+            if len(results) >= limit:
+                break
+    # Search patterns
+    for pid, p in dict(pattern_registry).items():
+        text = (p.get("text") or "").lower()
+        if q_lower in text:
+            results.append({"type": "pattern", "id": pid, "title": p.get("text", "")[:80], "score": p.get("score", 0)})
+    return results[:limit]
+
+
+@router.get("/tasks/timeline")
+def task_timeline(limit: int = 20):
+    """Return task phase transitions for timeline visualization."""
+    timeline = []
+    for tid, t in sorted(dict(tasks).items(), key=lambda x: x[0], reverse=True):
+        if t.get("_is_review_subtask"):
+            continue
+        transitions = t.get("_transitions", [])
+        phases = []
+        for tr in transitions:
+            phases.append({"from": tr.get("from", ""), "to": tr.get("to", ""), "at": tr.get("at", "")})
+        timeline.append({
+            "id": tid,
+            "description": (t.get("description") or "")[:80],
+            "agent": t.get("assigned_to"),
+            "status": t.get("status"),
+            "created_at": t.get("created_at") or t.get("created"),
+            "started_at": t.get("started_at"),
+            "completed_at": t.get("completed_at"),
+            "phases": phases,
+        })
+        if len(timeline) >= limit:
+            break
+    return timeline
+
+
+@router.get("/tasks/{tid}/predict")
+def predict_task(tid: int):
+    """Predict duration and cost for a task based on similar completed tasks."""
+    if tid not in tasks:
+        return {"error": "not found"}
+    t = tasks[tid]
+    desc_words = set((t.get("description") or "").lower().split())
+    agent = t.get("assigned_to", "")
+
+    # Find similar completed tasks
+    candidates = []
+    for other_tid, other in dict(tasks).items():
+        if other_tid == tid or other.get("status") != "done":
+            continue
+        if other.get("_is_review_subtask"):
+            continue
+        other_words = set((other.get("description") or "").lower().split())
+        overlap = len(desc_words & other_words)
+        same_agent = 1 if other.get("assigned_to") == agent else 0
+        score = overlap * 2 + same_agent * 3
+        if score > 2:
+            candidates.append({"tid": other_tid, "score": score, "task": other})
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    top = candidates[:5]
+    if not top:
+        return {"task_id": tid, "estimated_seconds": None, "estimated_cost": None, "confidence": "low", "basis": 0}
+
+    durations = []
+    costs = []
+    for c in top:
+        ct = c["task"]
+        if ct.get("elapsed_seconds"):
+            durations.append(ct["elapsed_seconds"])
+        # Get task cost
+        task_key = f"_task_{c['tid']}"
+        u = usage_log.get(task_key, {})
+        if u:
+            from hub.state import _PRICING
+            ti, to = u.get("tokens_in", 0), u.get("tokens_out", 0)
+            cost = (ti*0.5/1e6)*5 + (to*0.5/1e6)*25  # rough estimate
+            costs.append(cost)
+
+    est_sec = round(sum(durations) / len(durations)) if durations else None
+    est_cost = round(sum(costs) / len(costs), 4) if costs else None
+    confidence = "high" if len(top) >= 4 else "medium" if len(top) >= 2 else "low"
+
+    return {"task_id": tid, "estimated_seconds": est_sec, "estimated_cost": est_cost, "confidence": confidence, "basis": len(top)}

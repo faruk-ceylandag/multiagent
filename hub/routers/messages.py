@@ -107,7 +107,8 @@ def send_message(msg: Message):
                     return {"status": "ok", "queued": "chat"}
 
             # ── Dedup: merge identical messages from multiple agents within window ──
-            import hashlib as _hl, time as _time
+            import hashlib as _hl
+            import time as _time
             _now = _time.time()
             # Prune stale dedup entries
             stale = [k for k, v in _recent_msgs.items() if _now - v["ts"] > _DEDUP_WINDOW]
@@ -118,7 +119,7 @@ def send_message(msg: Message):
             _is_dup = False
             # Only dedup agent→user messages (not user→agent, not task/chat)
             if msg.sender != "user" and msg.receiver == "user" and msg.msg_type not in ("chat", "task", "plan_proposal"):
-                content_hash = _hl.md5(msg.content[:200].encode()).hexdigest()[:12]
+                content_hash = _hl.md5((msg.content[:500] + "|" + (msg.msg_type or "")).encode()).hexdigest()[:12]
                 _dedup_key = (content_hash, msg.msg_type, msg.receiver)
                 if _dedup_key in _recent_msgs:
                     prev = _recent_msgs[_dedup_key]

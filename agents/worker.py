@@ -12,7 +12,14 @@ All logic is split into focused modules:
   mcp_manager.py  — MCP server setup & reload
   learning.py     — Learning extraction, skills, hooks, templates
 """
-import sys, os, time, json, subprocess, signal, re, random
+import sys
+import os
+import time
+import json
+import subprocess
+import signal
+import re
+import random
 
 from .context import AgentContext
 from .log_utils import log, start_log_thread, flush_logs
@@ -20,18 +27,81 @@ from .hub_client import (hub_post, hub_get, hub_msg, set_status,
                          update_session, update_task_status, report_progress,
                          get_agent_roster, is_degraded)
 from .credentials import load_credentials, save_credential, check_missing_credentials
-from .git_ops import (git_stash_save, git_rollback, git_branch, git_commit,
-                      git_changed_files, collect_changes, create_github_pr,
-                      git, lock_file, unlock_file, unlock_all)
+from .git_ops import (git_rollback, git_branch, git_changed_files, collect_changes, git, unlock_all)
 from .claude_runner import call_claude
 from .verify import verify_loop
 from .chat_handler import start_chat_handler, stop_chat_handler
-from .mcp_manager import setup_mcp, reload_mcp, get_available_mcp, start_mcp_watcher
-from .learning import (read_file, load_skills, run_hook, load_template,
+from .mcp_manager import setup_mcp, reload_mcp, get_available_mcp, start_mcp_watcher, check_mcp_health
+from .learning import (read_file, run_hook, load_template,
                        render_template, extract_learning, get_project_index,
-                       get_project_stack, get_smart_hints, save_session, load_session,
+                       get_project_stack, get_smart_hints, load_session,
                        classify_learning_category, _broadcast_ecosystem_update)
 from .hub_client import get_relevant_patterns, get_peer_learnings
+
+# ── JSON Schema for structured review verdicts ──
+_REVIEW_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["approve", "request_changes"]},
+        "summary": {"type": "string"},
+        "comments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "severity": {"type": "string", "enum": ["critical", "warning", "info"]},
+                    "text": {"type": "string"}
+                },
+                "required": ["file", "severity", "text"]
+            }
+        }
+    },
+    "required": ["verdict", "comments"]
+})
+
+
+# ── Auto-retry helpers ──
+
+def _classify_error(error_info):
+    """Classify error for retry decisions."""
+    msg = str(error_info).lower()
+    if "rate limit" in msg or "429" in msg:
+        return "rate_limit"
+    if "timeout" in msg or "timed out" in msg:
+        return "timeout"
+    if "test" in msg and ("fail" in msg or "error" in msg):
+        return "test_failure"
+    if "lint" in msg:
+        return "lint_failure"
+    if "connection" in msg or "network" in msg:
+        return "transient"
+    return "unknown"
+
+
+def _should_auto_retry(ctx, task_id, error_info):
+    """Decide if task should be auto-retried."""
+    error_type = _classify_error(error_info)
+    retryable = {"rate_limit", "timeout", "transient", "test_failure"}
+    if error_type not in retryable:
+        return False, ""
+    # Check retry count
+    try:
+        task = hub_get(ctx, f"/tasks/{task_id}") or {}
+        retry_count = task.get("_retry_count", 0)
+        if retry_count >= 3:
+            return False, "max retries reached"
+    except Exception:
+        return False, "could not check retry count"
+
+    hints = {
+        "rate_limit": "Wait briefly then retry with reduced complexity",
+        "timeout": "Break the task into smaller steps",
+        "transient": "Simple retry should work",
+        "test_failure": "Fix the failing tests first, then verify",
+    }
+    return True, hints.get(error_type, "Retry the task")
 
 
 def _fetch_workspaces(ctx):
@@ -52,13 +122,23 @@ def _fetch_workspaces(ctx):
             ctx._workspace_refresh_at = time.time()
     except Exception:
         pass
-    # Sync add_dirs from config → ctx._extra_dirs
+    # Sync add_dirs from config + workspace paths → ctx._extra_dirs
+    dirs = []
+    # Workspace paths
+    for ws in getattr(ctx, '_workspaces', {}).values():
+        p = ws.get("path", "")
+        if p and os.path.isdir(p):
+            dirs.append(p)
+    # Explicit add_dirs from config
     try:
         cfg = hub_get(ctx, "/config")
         if isinstance(cfg, dict):
-            ctx._extra_dirs = [d for d in cfg.get("add_dirs", []) if os.path.isdir(d)]
+            for d in cfg.get("add_dirs", []):
+                if d and os.path.isdir(d) and d not in dirs:
+                    dirs.append(d)
     except Exception:
         pass
+    ctx._extra_dirs = dirs
 
 
 def _setup_stop_signal(ctx):
@@ -74,11 +154,35 @@ def _setup_stop_signal(ctx):
 
 
 def _parse_review_verdict(ctx):
-    """Parse VERDICT: approve/request_changes from reviewer's output."""
+    """Parse review verdict from reviewer's output.
+    Tries JSON schema output first, then falls back to text parsing."""
     lines = ctx._last_output_lines[-30:]  # Check last 30 lines
     verdict = None
     comments = []
 
+    # ── Try JSON schema output first (from --json-schema flag) ──
+    full_output = "\n".join(lines)
+    try:
+        # Look for JSON object in output
+        for line in reversed(lines):
+            line = line.strip()
+            if line.startswith("{") and "verdict" in line:
+                parsed = json.loads(line)
+                v = parsed.get("verdict", "")
+                if v in ("approve", "request_changes"):
+                    verdict = v
+                    comments = parsed.get("comments", [])
+                    # Normalize comment format
+                    comments = [
+                        {"file": c.get("file", ""), "line": c.get("line", 0),
+                         "severity": c.get("severity", "warning"), "text": c.get("text", "")}
+                        for c in comments if isinstance(c, dict)
+                    ]
+                    return verdict, comments
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+
+    # ── Fallback: text-based parsing ──
     # Look for VERDICT: line
     for line in reversed(lines):
         low = line.lower().strip()
@@ -183,6 +287,33 @@ def _process_ecosystem_updates(ctx, msgs):
         except (json.JSONDecodeError, Exception):
             pass
     return normal
+
+
+def _build_file_index(ctx, project):
+    """Build a lightweight project structure overview to reduce agent discovery tokens."""
+    if not project:
+        return ""
+    proj_dir = os.path.join(ctx.WORKSPACE, project)
+    if not os.path.isdir(proj_dir):
+        return ""
+    from lib.config import SKIP_DIRS
+    lines = []
+    try:
+        for entry in sorted(os.listdir(proj_dir)):
+            if entry.startswith(".") or entry in SKIP_DIRS:
+                continue
+            full = os.path.join(proj_dir, entry)
+            if os.path.isdir(full):
+                try:
+                    sub = len([f for f in os.listdir(full) if not f.startswith(".")])
+                except OSError:
+                    sub = 0
+                lines.append(f"  {entry}/ ({sub} items)")
+            else:
+                lines.append(f"  {entry}")
+    except OSError:
+        return ""
+    return "\nPROJECT STRUCTURE:\n" + "\n".join(lines[:30]) if lines else ""
 
 
 def _analyze_likely_files(ctx, task_content, project):
@@ -559,7 +690,7 @@ while True:
         _seen_content = set()
         _deduped = []
         for m in msgs:
-            _key = (m.get("sender", ""), m.get("content", "")[:200])
+            _key = (m.get("sender", ""), m.get("content", "")[:500], m.get("msg_type", ""))
             if _key not in _seen_content:
                 _seen_content.add(_key)
                 _deduped.append(m)
@@ -579,7 +710,7 @@ while True:
                     pline = pline.rstrip()
                     if pline:
                         log(ctx, f"📨 {pline[:300]}")
-                log(ctx, f"📨 ─────────────────────────────────")
+                log(ctx, "📨 ─────────────────────────────────")
             else:
                 log(ctx, f"  [{sender}] {content[:120]}")
 
@@ -665,8 +796,9 @@ while True:
         ctx._review_parent_id = None
         # Architect/QA/reviewers: fresh session each task (independent tasks, no carry-over)
         # Dev agents: keep session for multi-call conversation continuity
+        # Rework: keep session so agent remembers previous implementation context
         _fresh_session_roles = {"architect", "qa", "reviewer-logic", "reviewer-style", "reviewer-arch"}
-        if ctx.AGENT_NAME in _fresh_session_roles or _is_rework:
+        if ctx.AGENT_NAME in _fresh_session_roles:
             ctx.SESSION_ID = None
         elif ctx.SESSION_ID and not ctx.valid_sid(ctx.SESSION_ID):
             ctx.SESSION_ID = None
@@ -731,6 +863,13 @@ while True:
             update_task_status(ctx, ctx.current_task_id, "in_progress")
         ctx.reset_eco_tracking()
         _refresh_ecosystem(ctx)
+        # Load model policy from config for smart model selection
+        try:
+            _cfg_data = hub_get(ctx, "/config")
+            if isinstance(_cfg_data, dict):
+                ctx._model_policy = _cfg_data.get("model_policy", {})
+        except Exception:
+            pass
 
         for m in msgs:
             c = m.get("content", "").lower()
@@ -845,13 +984,17 @@ while True:
             project_ctx = f"\nPROJECT: {ctx.current_project}\nPROJECT DIR: {project_dir}\ncd {project_dir} before any work."
             if stack_info:
                 project_ctx += f"\nSTACK:\n{stack_info}"
+            # Pre-task file index: reduces agent ls/find discovery tokens
+            _file_idx = _build_file_index(ctx, ctx.current_project)
+            if _file_idx:
+                project_ctx += _file_idx
         else:
             # Only include full project index when project is unknown
             proj_index = get_project_index(ctx)
             project_ctx = f"\nWORKSPACE: {ctx.WORKSPACE}"
             if proj_index:
                 project_ctx += f"\nAVAILABLE PROJECTS:\n{proj_index}"
-                project_ctx += f"\nIMPORTANT: Identify the correct project first. Read its CLAUDE.md or README.md. Then cd into that project directory before doing any work. Do NOT scan all projects."
+                project_ctx += "\nIMPORTANT: Identify the correct project first. Read its CLAUDE.md or README.md. Then cd into that project directory before doing any work. Do NOT scan all projects."
             else:
                 project_ctx += "\nNo git projects found. Ask user which project if unclear."
 
@@ -897,10 +1040,10 @@ while True:
                     hub_msg(ctx, "user", "🔑 Credentials detected! Continuing with the task.", "info")
                     break
             else:
-                log(ctx, "⏱ Credential wait timeout — marking task as waiting")
-                hub_msg(ctx, "user", f"⏱ {ctx.AGENT_NAME}: credentials not received after 5 min. Task #{ctx.current_task_id or '?'} needs manual credential setup.", "blocker")
+                log(ctx, "⏱ Credential wait timeout — returning task to queue")
+                hub_msg(ctx, "user", f"⏱ {ctx.AGENT_NAME}: credentials not received after 5 min. Task #{ctx.current_task_id or '?'} returned to queue — provide credentials and retry.", "blocker")
                 if ctx.current_task_id:
-                    update_task_status(ctx, ctx.current_task_id, "failed", detail="Credentials not provided within timeout")
+                    update_task_status(ctx, ctx.current_task_id, "to_do", detail="Credentials not provided within timeout — retryable")
                 set_status(ctx, "idle")
                 ctx.current_task_id = None
                 ctx._task_start_time = 0
@@ -910,6 +1053,15 @@ while True:
         if _needed_mcps:
             from .mcp_manager import ensure_mcp
             ensure_mcp(ctx, _needed_mcps)
+
+        # Pre-flight MCP health check: warn agent about unreachable servers
+        _mcp_health_warning = ""
+        if _needed_mcps:
+            _healthy = check_mcp_health(ctx, _needed_mcps)
+            _unhealthy = set(_needed_mcps) - _healthy
+            if _unhealthy:
+                _mcp_health_warning = f"\n⚠ UNAVAILABLE MCP SERVERS: {', '.join(_unhealthy)} — use REST API fallback instead."
+                log(ctx, f"⚠ MCP health: {', '.join(_unhealthy)} unreachable")
 
         mcp_list = get_available_mcp(ctx)
 
@@ -1008,6 +1160,8 @@ MCP TOOL USAGE (MANDATORY — use these INSTEAD of WebFetch):
 {mcp_detail_str}
 
 CRITICAL: When you see a URL from a known MCP domain (figma.com, github.com, sentry.io, atlassian.net, docs.google.com, sheets.google.com, slides.google.com, drive.google.com, etc.), you MUST use the corresponding MCP tool or REST API. Do NOT use WebFetch for these domains. WebFetch is ONLY for URLs that no MCP tool handles."""
+            if _mcp_health_warning:
+                mcp_ctx += _mcp_health_warning
 
         # ── Context that only dev agents need (architect skips) ──
         lock_ctx = ""
@@ -1081,6 +1235,15 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
                 peer_learnings = get_peer_learnings(ctx, top=3)
                 learned_patterns_ctx = _build_patterns_block(patterns, peer_learnings)
                 ctx._active_pattern_ids = [p["id"] for p in (patterns or [])[:3]]
+                # Cross-agent memory: load shared codebase learnings
+                _shared_mem_file = os.path.join(ctx.MA_DIR, "memory", "learnings", f"{ctx.current_project or 'general'}.md")
+                if os.path.exists(_shared_mem_file):
+                    try:
+                        _mem_content = read_file(_shared_mem_file)
+                        if _mem_content and len(_mem_content) > 10:
+                            learned_patterns_ctx += f"\nSHARED CODEBASE KNOWLEDGE:\n{_mem_content[:500]}"
+                    except Exception:
+                        pass
             except Exception:
                 ctx._active_pattern_ids = []
 
@@ -1260,9 +1423,21 @@ RULES:
         except Exception:
             ctx._inbox_count_at_task_start = 0
         ctx._mid_task_notified = False
+        # Save task summary for verify/follow-up calls (survives session resets)
+        ctx._task_summary = task_text[:500]
         start_chat_handler(ctx, task_text[:500])
         task_cwd = os.path.join(ctx.WORKSPACE, ctx.current_project) if ctx.current_project and os.path.isdir(os.path.join(ctx.WORKSPACE, ctx.current_project)) else None
-        task_result = call_claude(ctx, prompt, cwd=task_cwd)
+        # Reviewer agents: use JSON schema for structured verdict output
+        _call_schema = _REVIEW_SCHEMA if ctx.AGENT_NAME.startswith("reviewer-") else None
+        # System prompt: static context (role, contracts, roster) — only on first call
+        # When session exists, these are already in context, saving ~1-2K tokens per call
+        _sys_prompt = None
+        if not ctx.valid_sid(ctx.SESSION_ID):
+            _sys_parts = [p for p in [role_ctx, contracts, roster] if p and p.strip()]
+            if _sys_parts:
+                _sys_prompt = "\n".join(_sys_parts)
+        task_result = call_claude(ctx, prompt, cwd=task_cwd, json_schema=_call_schema,
+                                  system_prompt=_sys_prompt)
         stop_chat_handler(ctx)
 
         if task_result is False and ctx._task_start_time and ctx.TASK_TIMEOUT > 0 and (time.time() - ctx._task_start_time) > ctx.TASK_TIMEOUT:
@@ -1396,13 +1571,11 @@ RULES:
                         })
                         log(ctx, f"📝 Auto-submitted review verdict: {verdict} ({len(comments)} comments) → parent #{_review_target}")
                     else:
-                        # Fallback: approve if no clear verdict found
-                        hub_post(ctx, f"/tasks/{_review_target}/review", {
-                            "agent": ctx.AGENT_NAME,
-                            "verdict": "approve",
-                            "comments": [],
-                        })
-                        log(ctx, f"📝 No clear verdict found — auto-approved → parent #{_review_target}")
+                        # No clear verdict found — fail the subtask so timeout handles it
+                        log(ctx, f"⚠ No clear verdict parsed — failing subtask (parent #{_review_target} handled by timeout)")
+                        if ctx._review_parent_id and ctx.current_task_id != ctx._review_parent_id:
+                            update_task_status(ctx, ctx.current_task_id, "failed",
+                                               detail="Could not parse review verdict from output")
                     # Mark own subtask as done (if it's a review subtask)
                     if ctx._review_parent_id and ctx.current_task_id != ctx._review_parent_id:
                         _sub_status = "done" if (verdict == "approve" or not verdict) else "failed"
@@ -1446,8 +1619,20 @@ RULES:
                     except Exception:
                         pass
                 update_task_status(ctx, ctx.current_task_id, _final_status, detail=fail_reason)
+            # Classify and report task type for adaptive routing
+            _task_type = ""
+            _task_desc_lower = (getattr(ctx, '_task_summary', '') or '').lower()
+            for _cat, _kws in [("frontend", ["frontend","ui","css","component","vue","react","page","layout","style"]),
+                               ("backend", ["api","endpoint","database","migration","model","controller","middleware","sql"]),
+                               ("testing", ["test","spec","e2e","playwright","cypress","coverage","lint"]),
+                               ("devops", ["deploy","docker","ci","pipeline","k8s","infrastructure"]),
+                               ("docs", ["docs","readme","documentation"])]:
+                if any(kw in _task_desc_lower for kw in _kws):
+                    _task_type = _cat
+                    break
             hub_post(ctx, "/agents/specialization", {"agent_name": ctx.AGENT_NAME,
-                "task_type": ctx.current_project or "general", "success": task_ok})
+                "task_type": ctx.current_project or "general", "success": task_ok,
+                "classified_type": _task_type})
 
         if not _skip_unlock:
             unlock_all(ctx)
@@ -1540,15 +1725,39 @@ RULES:
         stop_chat_handler(ctx)
         log(ctx, f"CONNECTION ERROR: {e} — will retry hub connection")
         if ctx.current_task_id:
-            update_task_status(ctx, ctx.current_task_id, "failed", detail=f"Connection lost: {str(e)[:200]}")
+            # Auto-retry logic
+            should_retry, retry_hint = _should_auto_retry(ctx, ctx.current_task_id, str(e))
+            if should_retry:
+                log(ctx, f"↻ Auto-retrying task #{ctx.current_task_id}: {retry_hint}")
+                try:
+                    _t = hub_get(ctx, f"/tasks/{ctx.current_task_id}") or {}
+                    hub_post(ctx, f"/tasks/{ctx.current_task_id}", {
+                        "_retry_count": (_t.get("_retry_count", 0) + 1), "status": "to_do"})
+                    hub_msg(ctx, "user", f"↻ Auto-retrying task #{ctx.current_task_id} ({_classify_error(str(e))}): {retry_hint}", "info")
+                except Exception:
+                    pass
+            else:
+                update_task_status(ctx, ctx.current_task_id, "failed", detail=f"Connection lost: {str(e)[:200]}")
         time.sleep(5)
         continue
     except TimeoutError as e:
         stop_chat_handler(ctx)
         log(ctx, f"TIMEOUT ERROR: {e}")
         if ctx.current_task_id:
-            update_task_status(ctx, ctx.current_task_id, "failed", detail=f"Timed out: {str(e)[:200]}")
-            hub_msg(ctx, "user", f"⏱ {ctx.AGENT_NAME}: task #{ctx.current_task_id} timed out: {str(e)[:100]}", "info")
+            # Auto-retry logic
+            should_retry, retry_hint = _should_auto_retry(ctx, ctx.current_task_id, str(e))
+            if should_retry:
+                log(ctx, f"↻ Auto-retrying task #{ctx.current_task_id}: {retry_hint}")
+                try:
+                    _t = hub_get(ctx, f"/tasks/{ctx.current_task_id}") or {}
+                    hub_post(ctx, f"/tasks/{ctx.current_task_id}", {
+                        "_retry_count": (_t.get("_retry_count", 0) + 1), "status": "to_do"})
+                    hub_msg(ctx, "user", f"↻ Auto-retrying task #{ctx.current_task_id} ({_classify_error(str(e))}): {retry_hint}", "info")
+                except Exception:
+                    pass
+            else:
+                update_task_status(ctx, ctx.current_task_id, "failed", detail=f"Timed out: {str(e)[:200]}")
+                hub_msg(ctx, "user", f"⏱ {ctx.AGENT_NAME}: task #{ctx.current_task_id} timed out: {str(e)[:100]}", "info")
         unlock_all(ctx)
         set_status(ctx, "idle")
         ctx.current_task_id = None
@@ -1565,8 +1774,20 @@ RULES:
         tb = traceback.format_exc()
         log(ctx, f"LOOP ERROR: {e}\n{tb[-500:]}")
         if ctx.current_task_id:
-            update_task_status(ctx, ctx.current_task_id, "failed", detail=f"Crashed: {str(e)[:300]}")
-            hub_msg(ctx, "user", f"❌ {ctx.AGENT_NAME}: task #{ctx.current_task_id} crashed: {str(e)[:200]}", "info")
+            # Auto-retry logic
+            should_retry, retry_hint = _should_auto_retry(ctx, ctx.current_task_id, str(e))
+            if should_retry:
+                log(ctx, f"↻ Auto-retrying task #{ctx.current_task_id}: {retry_hint}")
+                try:
+                    _t = hub_get(ctx, f"/tasks/{ctx.current_task_id}") or {}
+                    hub_post(ctx, f"/tasks/{ctx.current_task_id}", {
+                        "_retry_count": (_t.get("_retry_count", 0) + 1), "status": "to_do"})
+                    hub_msg(ctx, "user", f"↻ Auto-retrying task #{ctx.current_task_id} ({_classify_error(str(e))}): {retry_hint}", "info")
+                except Exception:
+                    pass
+            else:
+                update_task_status(ctx, ctx.current_task_id, "failed", detail=f"Crashed: {str(e)[:300]}")
+                hub_msg(ctx, "user", f"❌ {ctx.AGENT_NAME}: task #{ctx.current_task_id} crashed: {str(e)[:200]}", "info")
         hub_post(ctx, "/health/crash", {"agent_name": ctx.AGENT_NAME, "error": str(e),
                                         "exit_code": -1, "context": f"task={ctx.current_task_id}"})
         unlock_all(ctx)

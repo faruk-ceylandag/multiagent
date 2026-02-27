@@ -143,6 +143,17 @@ def update_task(tid: int, data: dict):
 
         tasks[tid].update(data)
         new_status = tasks[tid].get("status", "")
+
+        # Track phase transitions for timeline
+        if new_status and new_status != old_status:
+            if "_transitions" not in tasks[tid]:
+                tasks[tid]["_transitions"] = []
+            if len(tasks[tid]["_transitions"]) < 20:
+                tasks[tid]["_transitions"].append({
+                    "from": old_status, "to": new_status,
+                    "at": datetime.now().isoformat()
+                })
+
         if new_status == "in_progress" and not tasks[tid].get("started_at"):
             tasks[tid]["started_at"] = datetime.now().isoformat()
         if new_status == "in_progress" and not tasks[tid].get("_base_commit"):
@@ -178,19 +189,35 @@ def update_task(tid: int, data: dict):
             add_audit(tasks[tid].get("assigned_to", "system"), "task_update",
                       {"task_id": tid, "old_status": old_status, "new_status": new_status})
 
+        # Calculate elapsed_seconds when task reaches a terminal state
+        if new_status in ("done", "failed") and old_status != new_status:
+            started = tasks[tid].get("started_at", "")
+            if started:
+                try:
+                    started_dt = datetime.fromisoformat(started)
+                    elapsed = (datetime.now() - started_dt).total_seconds()
+                    tasks[tid]["elapsed_seconds"] = round(elapsed, 1)
+                except (ValueError, TypeError):
+                    pass
+
         # Release file locks held by this task when it reaches a terminal state
         if new_status in ("done", "failed", "cancelled") and old_status != new_status:
             for path in list(file_locks.keys()):
                 if file_locks[path].get("task_id") == tid:
                     del file_locks[path]
 
-        # Cancel active review subtasks when parent is cancelled/failed
+        # Cancel active review subtasks and clean up when parent is cancelled/failed
         if new_status in ("cancelled", "failed") and old_status != new_status:
             for sub_id in tasks[tid].get("_review_subtask_ids", []):
                 sub = tasks.get(sub_id)
                 if sub and sub.get("status") not in ("done", "failed", "cancelled"):
                     sub["status"] = "cancelled"
                     sub["completed_at"] = datetime.now().isoformat()
+            # Immediately clean comments/reviews for cancelled tasks
+            if new_status == "cancelled":
+                tid_str = str(tid)
+                task_comments.pop(tid_str, None)
+                task_reviews.pop(tid_str, None)
 
         # ── Auto-notification: only on actual status transitions ──
         if new_status == "code_review" and old_status != "code_review":
@@ -573,7 +600,7 @@ def _handle_qa_failure(tid, old_status, detail=""):
 
     qa_cycle = task.get("_qa_cycle", 0) + 1
 
-    if qa_cycle > MAX_REWORK_ITERATIONS:
+    if qa_cycle >= MAX_REWORK_ITERATIONS:
         # Max QA cycles reached — let task stay failed
         ts = datetime.now().isoformat()
         messages.setdefault("user", []).append({
@@ -954,11 +981,6 @@ def resolve_comment(tid: int, cid: int):
 def submit_review(tid: int, data: dict):
     """Submit a reviewer verdict: approve or request_changes."""
     tid_str = str(tid)
-    if tid not in tasks:
-        return {"status": "not_found"}
-    # Reject stale verdicts — task must be in code_review to accept reviews
-    if tasks[tid].get("status") != "code_review":
-        return {"status": "error", "message": f"Task not in code_review (current: {tasks[tid].get('status')})"}
     agent = data.get("agent", "")
     verdict = data.get("verdict", "")
     if verdict not in ("approve", "request_changes"):
@@ -968,6 +990,11 @@ def submit_review(tid: int, data: dict):
 
     review_comments = data.get("comments", [])
     with lock:
+        if tid not in tasks:
+            return {"status": "not_found"}
+        # Reject stale verdicts — task must be in code_review to accept reviews (checked under lock)
+        if tasks[tid].get("status") != "code_review":
+            return {"status": "error", "message": f"Task not in code_review (current: {tasks[tid].get('status')})"}
         # Store verdict
         task_reviews.setdefault(tid_str, {})[agent] = {
             "verdict": verdict,
@@ -1312,3 +1339,33 @@ def get_pending_plans(creator: str = "", task_id: str = ""):
             continue
         results.append({"plan_id": pid, "task_id": plan.get("task_id", ""), "created_by": plan.get("created_by", "")})
     return results
+
+
+@router.get("/tasks/{tid}/quality")
+def task_quality(tid: int):
+    """Calculate quality score for a task."""
+    if tid not in tasks:
+        return {"error": "not found"}
+    t = tasks[tid]
+    score = 100
+    tid_str = str(tid)
+    # Deductions
+    reviews = task_reviews.get(tid_str, {})
+    for agent_name, rv in reviews.items():
+        if rv.get("verdict") == "request_changes":
+            score -= 15
+    rework = t.get("_rework_count", 0)
+    score -= rework * 20
+    if t.get("_auto_approved"):
+        score -= 5
+    if t.get("status") == "failed":
+        score -= 30
+    # Test failures from test_results
+    from hub.state import test_results
+    for tr in test_results:
+        if tr.get("task_id") == tid and tr.get("tests_failed", 0) > 0:
+            score -= 10
+            break
+    score = max(0, min(100, score))
+    grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F"
+    return {"task_id": tid, "score": score, "grade": grade}

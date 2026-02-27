@@ -1,5 +1,11 @@
 """agents/claude_runner.py — Claude CLI execution with streaming, retries, model selection."""
-import os, json, subprocess, threading, time, re, random
+import os
+import json
+import subprocess
+import threading
+import time
+import re
+import random
 from .log_utils import log, humanize_bash, short_path, flush_logs
 from .hub_client import hub_post, hub_msg, report_progress, update_session
 from .credentials import load_credentials
@@ -83,15 +89,47 @@ def _score_complexity(prompt):
     return max(0, min(100, score))
 
 
-def classify_prompt(prompt, role=""):
+def _is_docs_only_task(prompt):
+    """Check if task only affects documentation/config files."""
+    low = prompt.lower()
+    doc_signals = ["readme", "changelog", "documentation", ".md file", "update docs",
+                   "add comment", "docstring", "jsdoc", "typedoc", "config file",
+                   ".env", ".yaml", ".yml", ".toml", ".json config"]
+    code_signals = ["implement", "create file", "write code", "add endpoint", "fix bug",
+                    "refactor", "migration", "add feature", "build", "test"]
+    has_doc = any(s in low for s in doc_signals)
+    has_code = any(s in low for s in code_signals)
+    return has_doc and not has_code
+
+
+def _is_single_file_task(prompt):
+    """Check if task likely touches only one file."""
+    low = prompt.lower()
+    file_refs = re.findall(r'[\w/]+\.\w{1,5}\b', low)
+    # Unique file references
+    unique_files = set(f for f in file_refs if not f.startswith("http"))
+    return len(unique_files) <= 1 and len(prompt) < 3000
+
+
+def classify_prompt(prompt, role="", model_policy=None):
     """Classify prompt into model tier: opus/sonnet/haiku.
     Role-aware: architect always sonnet, reviewers always haiku, system notifications capped at sonnet."""
     # Architect only delegates — never needs opus
     if role == "architect":
         return "sonnet"
-    # Reviewers always use haiku — simple approve/reject tasks
+    # Logic reviewer uses sonnet (catches bugs, race conditions, edge cases)
+    # Other reviewers use haiku — simple style/arch checks
     if role and role.startswith("reviewer"):
+        if "logic" in role:
+            return "sonnet"
         return "haiku"
+
+    # Config-driven model policy: docs_only/single_file tasks → cheaper model
+    if model_policy:
+        if model_policy.get("docs_only") and _is_docs_only_task(prompt):
+            return model_policy["docs_only"]  # e.g. "sonnet"
+        if model_policy.get("single_file") and _is_single_file_task(prompt):
+            return model_policy["single_file"]  # e.g. "sonnet"
 
     score = _score_complexity(prompt)
     if score <= 5:
@@ -108,7 +146,8 @@ def pick_model(ctx, prompt, force=None):
     if ctx.MODEL_OVERRIDE:
         return ctx.MODEL_OVERRIDE
     role = getattr(ctx, "AGENT_ROLE", "")
-    tier = classify_prompt(prompt, role=role)
+    policy = getattr(ctx, '_model_policy', None)
+    tier = classify_prompt(prompt, role=role, model_policy=policy)
     if tier == "haiku":
         # Use haiku if available, otherwise fall back to sonnet
         return getattr(ctx, "MODEL_HAIKU", ctx.MODEL_SONNET)
@@ -139,6 +178,21 @@ def handle_rl(ctx, stderr, code):
         hub_msg(ctx, "user", f"⚠ {ctx.AGENT_NAME} rate limited ({backoff}s)", "info")
         hub_post(ctx, "/agents/rate_limited", {"agent_name": ctx.AGENT_NAME,
                                                "until": ctx.rate_limited_until, "backoff": backoff})
+        # Report to shared rate pool
+        try:
+            hub_post(ctx, "/agents/rate_pool/report", {})
+        except Exception:
+            pass
+        # Report circuit failure for dashboard tracking
+        try:
+            hub_post(ctx, "/agents/tool_event", {
+                "agent_name": ctx.AGENT_NAME,
+                "event": {"type": "circuit_failure", "tool": "claude_api",
+                          "detail": f"Rate limited on {getattr(ctx, 'MODEL_OVERRIDE', '') or 'unknown'}",
+                          "timestamp": time.time()}
+            })
+        except Exception:
+            pass
         return True
     return False
 
@@ -151,13 +205,16 @@ def report_usage(ctx, u, model_name=""):
     pre = getattr(ctx, '_pre_call_tokens', ctx.session_tokens)
     ctx.session_tokens = pre + tin + tout
     if tin or tout:
+        _task_id = str(getattr(ctx, 'current_task_id', '') or '')
         hub_post(ctx, "/costs/log", {"agent_name": ctx.AGENT_NAME, "tokens_in": tin,
-                                     "tokens_out": tout, "model": model_name})
+                                     "tokens_out": tout, "model": model_name,
+                                     "task_id": _task_id})
 
 
 # ── Main Call ──
 
-def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
+def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
+                continue_session=False, json_schema=None, system_prompt=None):
     effective_cwd = cwd or ctx.AGENT_CWD
     # Task-level timeout check
     if ctx._task_start_time and ctx.TASK_TIMEOUT > 0:
@@ -208,10 +265,47 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
             if ctx.AGENT_NAME == "architect":
                 # Architect can read codebase (for better plans) but NOT write code
                 cmd.extend(["--allowedTools", "Read,Glob,Grep,Bash(curl*),mcp__*,WebFetch,WebSearch,Task"])
+                cmd.extend(["--permission-mode", "plan"])
             else:
                 cmd.extend(["--allowedTools", "Edit,Write,Read,Bash(*),mcp__*"])
-            cmd.extend(["--output-format", "stream-json", "--verbose"])
+
+            # ── Output format: json-schema forces json, otherwise stream-json ──
+            if json_schema:
+                cmd.extend(["--output-format", "json"])
+                cmd.extend(["--json-schema", json_schema])
+            else:
+                cmd.extend(["--output-format", "stream-json"])
+            cmd.append("--verbose")
             cmd.extend(["--model", model])
+
+            # ── Effort level: lower effort for simple tasks saves tokens ──
+            role = getattr(ctx, "AGENT_ROLE", "")
+            tier = classify_prompt(prompt, role=role)
+            if tier == "haiku":
+                cmd.extend(["--effort", "low"])
+            elif tier == "sonnet" and "opus" not in model:
+                cmd.extend(["--effort", "medium"])
+            # opus → default high (omit flag)
+
+            # ── Fallback model: automatic downgrade on overload ──
+            if "opus" in model:
+                cmd.extend(["--fallback-model", ctx.MODEL_SONNET])
+            elif "sonnet" in model:
+                _haiku = getattr(ctx, "MODEL_HAIKU", "claude-haiku-4-5-20251001")
+                cmd.extend(["--fallback-model", _haiku])
+
+            # ── Per-call budget limit ──
+            budget = getattr(ctx, 'BUDGET_LIMIT', 0)
+            if budget > 0:
+                _total_so_far = getattr(ctx, '_total_cost_so_far', 0)
+                remaining = max(0, budget - _total_so_far)
+                per_call = max(0.10, remaining * 0.25)
+                cmd.extend(["--max-budget-usd", str(round(per_call, 2))])
+
+            # ── System prompt injection (static role/contract context) ──
+            if system_prompt:
+                cmd.extend(["--append-system-prompt", system_prompt])
+
             # Always run from AGENT_CWD so .claude/ stays in session dir, not in project
             # Give access to project dir via --add-dir
             if effective_cwd != ctx.AGENT_CWD and os.path.isdir(effective_cwd):
@@ -221,9 +315,59 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
             for d in extra_dirs:
                 if os.path.isdir(d):
                     cmd.extend(["--add-dir", d])
-            if ctx.valid_sid(ctx.SESSION_ID):
+
+            # ── Session continuity ──
+            # Task-based sessions: same task always resumes same session (survives rework)
+            _task_sid = None
+            if ctx.current_task_id:
+                _task_sid = ctx.get_task_session(ctx.current_task_id)
+                cmd.extend(["--session-id", _task_sid])
+
+            if continue_session and ctx.valid_sid(ctx.SESSION_ID):
+                # --continue resumes last conversation without re-sending context
+                cmd.extend(["--continue", "-p", prompt])
+            elif ctx.valid_sid(ctx.SESSION_ID):
                 cmd.extend(["--resume", ctx.SESSION_ID])
-            cmd.extend(["-p", prompt])
+                cmd.extend(["-p", prompt])
+            elif _task_sid:
+                # New task session — try resuming the deterministic session
+                cmd.extend(["--resume", _task_sid])
+                cmd.extend(["-p", prompt])
+            else:
+                cmd.extend(["-p", prompt])
+
+            # Advisory rate pool check
+            try:
+                rp = hub_post(ctx, "/agents/rate_pool/acquire", {})
+                if rp and not rp.get("allowed", True):
+                    wait = rp.get("wait", 0)
+                    if wait > 0:
+                        log(ctx, f"⏳ Rate pool: waiting {wait:.1f}s")
+                        time.sleep(min(wait, 10))
+            except Exception:
+                pass
+
+            # Circuit breaker check
+            circuit_key = model or "default"
+            try:
+                from .hub_client import hub_get
+                circuits = hub_get(ctx, "/health/circuits") or {}
+                cb = circuits.get(circuit_key, {})
+                if cb.get("state") == "open":
+                    log(ctx, f"⚠ Circuit open for {circuit_key}, trying fallback")
+                    if "opus" in circuit_key:
+                        model = model.replace("opus", "sonnet")
+                        model_tag = "sonnet"
+                    elif "sonnet" in circuit_key:
+                        model = model.replace("sonnet", "haiku")
+                        model_tag = "haiku"
+                    # Update cmd model arg
+                    for _ci in range(len(cmd)):
+                        if cmd[_ci] == "--model" and _ci + 1 < len(cmd):
+                            cmd[_ci + 1] = model
+                            break
+            except Exception:
+                pass
 
             run_env = os.environ.copy()
             run_env.pop("CLAUDECODE", None)  # Prevent nested session detection
@@ -248,7 +392,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
                 with ctx._stop_lock:
                     should_stop = ctx._should_stop
                 if ctx._task_start_time and ctx.TASK_TIMEOUT > 0 and (time.time() - ctx._task_start_time) > ctx.TASK_TIMEOUT:
-                    log(ctx, f"⏱ Task timeout mid-call — terminating")
+                    log(ctx, "⏱ Task timeout mid-call — terminating")
                     should_stop = True
                 if should_stop:
                     log(ctx, "⛔ Stop signal mid-call")
@@ -323,6 +467,15 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
                                 else:
                                     log(ctx, f"  🔧 {tool_name}: {detail}" if detail else f"  🔧 {tool_name}")
                                     report_progress(ctx, "tool_use", f"{tool_name}: {detail}" if detail else tool_name)
+                                # Report tool event to hub for live dashboard
+                                try:
+                                    detail_str = detail or tool_name
+                                    hub_post(ctx, "/agents/tool_event", {
+                                        "agent_name": ctx.AGENT_NAME,
+                                        "event": {"type": "tool_use", "tool": tool_name, "detail": detail_str[:100], "timestamp": time.time()}
+                                    })
+                                except Exception:
+                                    pass
                                 if tool_name in ("Edit", "Write") and inp.get("file_path"):
                                     lock_file(ctx, inp["file_path"])
                                 track_ecosystem_use(ctx, tool_name, inp)
@@ -387,7 +540,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
                 out_text = " ".join(ctx._last_output_lines[-5:]).lower() if ctx._last_output_lines else ""
                 is_api_500 = any(s in out_text for s in ["500", "api_error", "internal server error", "overloaded"])
                 if is_api_500:
-                    log(ctx, f"⚠ API server error (500) — transient, retrying")
+                    log(ctx, "⚠ API server error (500) — transient, retrying")
                     _model_failed = False  # Don't downgrade model for server errors
                 else:
                     log(ctx, f"⚠ exit={code} with no stderr — model may be unavailable")
@@ -410,7 +563,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
                 if attempt == 1:
                     hub_msg(ctx, "user", f"⚠ {ctx.AGENT_NAME} API connection issue (ECONNRESET), retrying in {int(wait)}s...", "info")
                 time.sleep(wait)
-                ctx.SESSION_ID = None
+                # Preserve session on connection errors — server-side session is still valid
                 if attempt >= 3 and "opus" in model:
                     _model_failed = True
                 else:
@@ -429,7 +582,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None):
             elif attempt < retries:
                 log(ctx, "⚠ retry...")
                 time.sleep(2)
-                ctx.SESSION_ID = None
+                # Don't reset session — preserve context for retry
             else:
                 handle_rl(ctx, "\n".join(stderr_lines), code)
                 log(ctx, f"✗ failed after {retries} tries")

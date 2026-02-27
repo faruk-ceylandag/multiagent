@@ -1,5 +1,6 @@
 """lib/config.py — Config system + stack detection + routing"""
-import os, json, glob
+import os
+import json
 
 DEFAULT_PORT = 8040
 DEFAULT_AGENTS = [
@@ -56,6 +57,7 @@ def load_config(workspace: str) -> dict:
         "auto_plan_single_step": True,  # True → auto-approve single-step plans
         "escalation_threshold": 3,      # N failures → escalate to architect
         "add_dirs": [],                   # Extra directories accessible to all agents via --add-dir
+        "model_policy": {},               # Smart model selection: {"docs_only": "sonnet", "single_file": "sonnet"}
     }
     for name in ["multiagent.json", ".multiagent/config.json"]:
         path = os.path.join(workspace, name)
@@ -81,6 +83,25 @@ def load_config(workspace: str) -> dict:
                 import logging
                 logging.getLogger("config").warning(f"Config parse error: {e}")
             break
+    # Bounds validation
+    _bounds = {
+        "port": (1024, 65535),
+        "boot_stagger": (0, 30),
+        "max_context": (1000, 200000),
+        "budget_limit": (0, 100000),
+        "budget_per_agent": (0, 100000),
+        "escalation_threshold": (1, 50),
+    }
+    for key, (lo, hi) in _bounds.items():
+        if key in cfg:
+            try:
+                val = int(cfg[key])
+                cfg[key] = max(lo, min(hi, val))
+            except (TypeError, ValueError):
+                cfg[key] = {
+                    "port": DEFAULT_PORT, "boot_stagger": 2, "max_context": 12000,
+                    "budget_limit": 0, "budget_per_agent": 0, "escalation_threshold": 3,
+                }.get(key, 0)
     return cfg
 
 

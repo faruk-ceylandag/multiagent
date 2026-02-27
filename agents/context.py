@@ -1,5 +1,5 @@
 """agents/context.py — Shared AgentContext dataclass for all worker modules."""
-import os, sys, json, threading, re
+import os, sys, json, threading, re, uuid
 from datetime import datetime
 
 
@@ -75,12 +75,21 @@ class AgentContext:
         self._chat_running = False
         self._task_context = ""
 
+        # ── Task continuity: summary of what was done so far (survives session resets) ──
+        self._task_summary = ""  # Brief description of current task for verify/follow-up calls
+
         # ── Review subtask tracking ──
         self._review_parent_id = None  # Parent task ID when this agent is working on a review subtask
 
         # ── Multi-workspace support ──
         self._workspaces = {}  # {ws_id: {path, name, projects, stacks}}
         self._workspace_refresh_at = 0  # timestamp of last workspace list refresh
+
+        # ── Model policy from config (smart model selection) ──
+        self._model_policy = {}  # loaded from config at task start
+
+        # ── Task-based session map: same task reuses same session across rework ──
+        self._session_map = {}  # task_id → session_id
 
         # ── Inbox peek (mid-task notification) ──
         self._inbox_count_at_task_start = 0
@@ -96,6 +105,13 @@ class AgentContext:
     def reset_eco_tracking(self):
         """Reset per-task tracking (call at start of each task)."""
         self._eco_reported = set()
+
+    def get_task_session(self, task_id):
+        """Deterministic session ID: same task always resumes the same session."""
+        if task_id not in self._session_map:
+            namespace = uuid.UUID('12345678-1234-5678-1234-567812345678')
+            self._session_map[task_id] = str(uuid.uuid5(namespace, f"{task_id}-{self.AGENT_NAME}"))
+        return self._session_map[task_id]
 
     def get_workspace_path(self, workspace_id):
         """Get filesystem path for a workspace ID."""

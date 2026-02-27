@@ -3,7 +3,15 @@
 Multi-Agent System — by Ö. Faruk Ceylandağ
 Usage: python3 start.py [/path/to/workspace]
 """
-import os, sys, time, shutil, subprocess, signal, json, socket, argparse
+import os
+import sys
+import time
+import shutil
+import subprocess
+import signal
+import json
+import socket
+import argparse
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -59,7 +67,7 @@ AGENTS = cfg.get("agents", [])
 
 # ── Auto-inject hidden reviewer agents (required for code review pipeline) ──
 _REVIEWER_AGENTS = [
-    {"name": "reviewer-logic", "role": "code reviewer — logic & correctness", "model": "haiku", "hidden": True},
+    {"name": "reviewer-logic", "role": "code reviewer — logic & correctness", "model": "sonnet", "hidden": True},
     {"name": "reviewer-style", "role": "code reviewer — style & readability", "model": "haiku", "hidden": True},
     {"name": "reviewer-arch", "role": "code reviewer — architecture & design", "model": "haiku", "hidden": True},
 ]
@@ -139,8 +147,12 @@ if _mcp: log(f"MCP servers: {', '.join(_mcp.keys())}")
 def port_free(port):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1); s.connect(("127.0.0.1", port)); s.close(); return False
-    except OSError: return True
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", port))
+        s.close()
+        return True
+    except OSError:
+        return False
 
 def is_own_hub(port, ma_dir):
     """Check if the process on this port belongs to THIS workspace's hub."""
@@ -302,7 +314,8 @@ except Exception as e:
 
 # ── Deps ──
 try:
-    import fastapi, uvicorn
+    import fastapi
+    import uvicorn
 except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "--break-system-packages", "-q",
                     "fastapi", "uvicorn[standard]", "sse-starlette", "websockets"], capture_output=True)
@@ -358,7 +371,12 @@ for i in range(30):
     time.sleep(0.5)
     try:
         from urllib.request import urlopen
-        urlopen(f"{HUB_URL}/health", timeout=2); break
+        resp = urlopen(f"{HUB_URL}/health", timeout=2)
+        health_data = json.loads(resp.read())
+        if health_data.get("initialized", False):
+            break
+        # Hub is up but state not loaded yet — keep waiting
+        if i == 29: err("Hub state never initialized — check .multiagent/logs/hub.log")
     except Exception:
         if hub_proc.poll() is not None:
             # Hub process already exited — show error
@@ -376,29 +394,6 @@ for i in range(30):
 with open(os.path.join(MA_DIR, ".hub.pid"), "w") as f: f.write(str(hub_proc.pid))
 with open(os.path.join(MA_DIR, ".hub.port"), "w") as f: f.write(str(HUB_PORT))
 log(f"Hub on :{HUB_PORT}")
-
-# ── OAuth Pre-Auth (only if mcp-needs-auth-cache has pending auths) ──
-_auth_cache = os.path.expanduser("~/.claude/mcp-needs-auth-cache.json")
-if os.path.exists(_auth_cache):
-    try:
-        with open(_auth_cache) as f:
-            _needs_auth = json.load(f)
-        if _needs_auth:
-            _names = list(_needs_auth.keys())
-            log(f"OAuth pending: {', '.join(_names)}")
-            _oauth_env = os.environ.copy()
-            _oauth_env.pop("CLAUDECODE", None)
-            for _n in _names:
-                print(f"  {Y}🔐 {_n}: browser will open for OAuth...{NC}", flush=True)
-                try:
-                    subprocess.run(
-                        ["claude", "-p", f"Call any mcp__{_n} tool. Reply OK.",
-                         "--allowedTools", f"mcp__{_n}__*", "--max-turns", "2"],
-                        timeout=120, stdin=None, env=_oauth_env)
-                except (subprocess.TimeoutExpired, Exception):
-                    warn(f"  {_n}: auth not completed")
-    except (json.JSONDecodeError, OSError):
-        pass
 
 # ── Launch Workers (staggered to avoid rate limits) ──
 python = sys.executable
@@ -460,7 +455,12 @@ try: import webbrowser; webbrowser.open(url)
 except Exception: pass
 
 # ── Cleanup ──
+_cleanup_running = False
 def cleanup(sig=None, frame=None):
+    global _cleanup_running
+    if _cleanup_running:
+        return
+    _cleanup_running = True
     print(f"\n{DIM}Shutting down...{NC}")
     # Signal hub to save state before terminating
     try:

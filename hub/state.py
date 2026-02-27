@@ -15,6 +15,7 @@ logger = logging.getLogger("hub")
 
 lock = threading.Lock()
 _shutdown_event = threading.Event()
+_state_initialized = False
 
 MA_DIR = os.environ.get("MA_DIR", "")
 WORKSPACE = os.environ.get("WORKSPACE", "")
@@ -69,7 +70,9 @@ class SessionInfo(BaseModel):
     started_at: str = ""; claude_calls: int = 0
 
 class CostEntry(BaseModel):
+    model_config = {"extra": "allow"}
     agent_name: str; tokens_in: int = 0; tokens_out: int = 0; model: str = ""
+    task_id: str = ""
 
 class FileLock(BaseModel):
     file_path: str; agent_name: str; task_id: int | None = None
@@ -98,6 +101,19 @@ agent_specialization: Dict[str, dict] = {}
 agent_learnings: List[dict] = []
 agent_roles: Dict[str, str] = {}  # {agent_name: role_description}
 file_plans: Dict[str, dict] = {}  # {agent_name: {task_id, files, timestamp}} — transient, no persistence
+
+# ── Tool Stream (transient, no persistence) ──
+tool_events: Dict[str, deque] = {}   # {agent_name: deque(maxlen=200)}
+tool_counters: Dict[str, int] = {}   # {agent_name: int}
+
+# ── Rate Pool (transient) ──
+rate_pool = {"bucket_tokens": 100, "bucket_max": 100, "refill_rate": 2.0, "last_refill": time.time()}
+
+# ── Circuit Breakers (transient) ──
+circuit_breakers: Dict[str, dict] = {}  # {model_key: {state, failures, last_failure, cooldown, threshold, success_count}}
+
+# ── Webhook Registry ──
+webhook_registry: List[dict] = []  # [{url, type, events, name, active}]
 
 # ── Plan Proposals ──
 pending_plans: Dict[int, dict] = {}  # {plan_id: {steps, project, branch, status, created_by, created}}
@@ -196,20 +212,24 @@ SERVICE_REGISTRY = [
     {
         "id": "atlassian", "name": "Atlassian (Jira/Confluence)", "mcp": "atlassian",
         "icon": "\U0001f537", "color": "#0052CC",
-        "auth_url": "https://mcp.atlassian.com",
+        "auth_type": "oauth",
+        "auth_url": "https://admin.atlassian.com",
+        "mcp_cmd": "claude mcp add --transport sse atlassian https://mcp.atlassian.com/v1/sse",
         "credentials": [],
         "connected": True,
         "docs": "https://www.atlassian.com/platform/remote-mcp-server",
-        "setup_note": "Official remote MCP server — authenticates via OAuth in browser. No API tokens needed.",
+        "setup_note": "OAuth — run the CLI command below to authenticate via browser. No API tokens needed.",
     },
     {
         "id": "figma", "name": "Figma", "mcp": "figma",
         "icon": "\U0001f3a8", "color": "#F24E1E",
-        "auth_url": "https://mcp.figma.com",
+        "auth_type": "oauth",
+        "auth_url": "https://www.figma.com/settings",
+        "mcp_cmd": "claude mcp add --transport http figma https://mcp.figma.com/mcp",
         "credentials": [],
         "connected": True,
         "docs": "https://help.figma.com/hc/en-us/articles/32132956003351-Guide-to-the-Figma-MCP-Server",
-        "setup_note": "Official remote MCP server — authenticates via OAuth in browser. No API tokens needed.",
+        "setup_note": "OAuth — run the CLI command below to authenticate via browser. No API tokens needed.",
     },
     {
         "id": "github", "name": "GitHub", "mcp": "github",
@@ -225,11 +245,13 @@ SERVICE_REGISTRY = [
     {
         "id": "sentry", "name": "Sentry", "mcp": "sentry",
         "icon": "\U0001f534", "color": "#362D59",
-        "auth_url": "https://mcp.sentry.dev",
+        "auth_type": "oauth",
+        "auth_url": "https://sentry.io/settings/account/api/auth-tokens/",
+        "mcp_cmd": "claude mcp add --transport http sentry https://mcp.sentry.dev/mcp",
         "credentials": [],
         "connected": True,
         "docs": "https://docs.sentry.io/organization/integrations/integration-platform/internal-integration/",
-        "setup_note": "Official remote MCP server — authenticates via OAuth in browser. No API tokens needed.",
+        "setup_note": "OAuth — run the CLI command below to authenticate via browser. No API tokens needed.",
     },
     {
         "id": "google", "name": "Google Workspace", "mcp": "google",
@@ -448,54 +470,56 @@ def _do_save():
                 tasks.clear()
                 tasks.update(active)
                 task_snapshot = dict(tasks)
-        # Bounded data structure cleanup
-        # Clean comments/reviews for completed tasks
-        active_tids = {str(k) for k, v in task_snapshot.items() if v.get("status") not in ("done", "failed", "cancelled")}
-        for tid_str in list(task_comments.keys()):
-            if tid_str not in active_tids:
-                del task_comments[tid_str]
-        for tid_str in list(task_reviews.keys()):
-            if tid_str not in active_tids:
-                del task_reviews[tid_str]
-        # Cap pending_plans
-        if len(pending_plans) > MAX_PENDING_PLANS:
-            non_pending = [pid for pid, p in pending_plans.items() if p.get("status") != "pending"]
-            for pid in sorted(non_pending)[:len(pending_plans) - MAX_PENDING_PLANS]:
-                del pending_plans[pid]
-        # Cap cache_registry (LRU by created timestamp)
-        if len(cache_registry) > MAX_CACHE_ENTRIES:
-            sorted_keys = sorted(cache_registry.keys(), key=lambda k: cache_registry[k].get("created", ""))
-            for k in sorted_keys[:len(cache_registry) - MAX_CACHE_ENTRIES]:
-                entry = cache_registry.pop(k, None)
-                if entry and entry.get("path"):
-                    try:
-                        os.remove(entry["path"])
-                    except OSError:
-                        pass
-        # Cap learnings
-        if len(agent_learnings) > MAX_LEARNINGS:
-            del agent_learnings[:len(agent_learnings) - MAX_LEARNINGS]
-        # Build snapshot without lock — GIL ensures atomic dict/list reads
-        snapshot = {
-            "tasks": task_snapshot, "usage_log": dict(usage_log), "sessions": dict(sessions),
-            "changes": list(changes[-100:]), "change_counter": change_counter,
-            "user_messages": list(messages.get("user", []))[-200:],
-            "analytics": list(analytics_log[-500:]),
-            "test_results": list(test_results[-200:]),
-            "specialization": dict(agent_specialization),
-            "learnings": list(agent_learnings[-200:]),
-            "agent_roles": dict(agent_roles),
-            "pending_plans": dict(pending_plans),
-            "plan_counter": _plan_counter,
-            "cache_registry": dict(cache_registry),
-            "patterns": dict(pattern_registry),
-            "pattern_id_counter": _pattern_id_counter,
-            "messages": {k: list(v)[-150:] for k, v in dict(messages).items()},
-            "task_comments": dict(task_comments),
-            "task_reviews": dict(task_reviews),
-            "comment_counter": _comment_counter,
-            "workspace_registry": dict(workspace_registry),
-        }
+        # Bounded data structure cleanup — under lock to prevent race conditions
+        with lock:
+            # Clean comments/reviews for completed tasks
+            active_tids = {str(k) for k, v in task_snapshot.items() if v.get("status") not in ("done", "failed", "cancelled")}
+            for tid_str in list(task_comments.keys()):
+                if tid_str not in active_tids:
+                    del task_comments[tid_str]
+            for tid_str in list(task_reviews.keys()):
+                if tid_str not in active_tids:
+                    del task_reviews[tid_str]
+            # Cap pending_plans
+            if len(pending_plans) > MAX_PENDING_PLANS:
+                non_pending = [pid for pid, p in pending_plans.items() if p.get("status") != "pending"]
+                for pid in sorted(non_pending)[:len(pending_plans) - MAX_PENDING_PLANS]:
+                    del pending_plans[pid]
+            # Cap cache_registry (LRU by created timestamp)
+            if len(cache_registry) > MAX_CACHE_ENTRIES:
+                sorted_keys = sorted(cache_registry.keys(), key=lambda k: cache_registry[k].get("created", ""))
+                for k in sorted_keys[:len(cache_registry) - MAX_CACHE_ENTRIES]:
+                    entry = cache_registry.pop(k, None)
+                    if entry and entry.get("path"):
+                        try:
+                            os.remove(entry["path"])
+                        except OSError:
+                            pass
+            # Cap learnings
+            if len(agent_learnings) > MAX_LEARNINGS:
+                del agent_learnings[:len(agent_learnings) - MAX_LEARNINGS]
+            # Snapshot counters and mutable dicts under lock
+            snapshot = {
+                "tasks": task_snapshot, "usage_log": dict(usage_log), "sessions": dict(sessions),
+                "changes": list(changes[-100:]), "change_counter": change_counter,
+                "user_messages": list(messages.get("user", []))[-200:],
+                "analytics": list(analytics_log[-500:]),
+                "test_results": list(test_results[-200:]),
+                "specialization": dict(agent_specialization),
+                "learnings": list(agent_learnings[-200:]),
+                "agent_roles": dict(agent_roles),
+                "pending_plans": dict(pending_plans),
+                "plan_counter": _plan_counter,
+                "cache_registry": dict(cache_registry),
+                "patterns": dict(pattern_registry),
+                "pattern_id_counter": _pattern_id_counter,
+                "messages": {k: list(v)[-150:] for k, v in dict(messages).items()},
+                "task_comments": dict(task_comments),
+                "task_reviews": dict(task_reviews),
+                "comment_counter": _comment_counter,
+                "workspace_registry": dict(workspace_registry),
+                "webhook_registry": list(webhook_registry),
+            }
         # Atomic write: temp file + rename
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w") as f:
@@ -538,7 +562,7 @@ def load_state():
     global test_results, agent_specialization, agent_learnings
     global pattern_registry, _pattern_id_counter
     global pending_plans, _plan_counter, cache_registry
-    global task_comments, task_reviews, _comment_counter, workspace_registry
+    global task_comments, task_reviews, _comment_counter, workspace_registry, webhook_registry
     if not STATE_FILE or not os.path.exists(STATE_FILE):
         return
     try:
@@ -550,6 +574,7 @@ def load_state():
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Corrupt state file: {e}, trying backups...")
         s = None
+        _restored_from = None
         for i in range(1, 4):
             bak = f"{STATE_FILE}.bak.{i}"
             if os.path.exists(bak):
@@ -557,12 +582,25 @@ def load_state():
                     with open(bak) as f:
                         s = json.load(f)
                     logger.info(f"Restored from backup {bak}")
+                    _restored_from = bak
                     break
                 except (json.JSONDecodeError, OSError):
                     continue
         if s is None:
             logger.error("All state backups corrupt or missing, starting fresh")
+            # Notify dashboard about total state loss
+            messages.setdefault("user", []).append({
+                "sender": "system", "receiver": "user",
+                "content": "⚠️ State file and all backups were corrupt or missing. Starting with fresh state — previous tasks/data lost.",
+                "msg_type": "blocker", "timestamp": datetime.now().isoformat(),
+            })
             return
+        # Notify dashboard about backup restore
+        messages.setdefault("user", []).append({
+            "sender": "system", "receiver": "user",
+            "content": f"⚠️ State file was corrupt. Restored from backup ({os.path.basename(_restored_from)}). Some recent changes may be lost.",
+            "msg_type": "warning", "timestamp": datetime.now().isoformat(),
+        })
     try:
         tasks.update({int(k): v for k, v in s.get("tasks", {}).items()})
         usage_log.update(s.get("usage_log", {}))
@@ -590,6 +628,7 @@ def load_state():
         task_reviews.update(s.get("task_reviews", {}))
         _comment_counter = s.get("comment_counter", 0)
         workspace_registry.update(s.get("workspace_registry", {}))
+        webhook_registry.extend(s.get("webhook_registry", []))
         # ── Migrate legacy task statuses ──
         for tid, task in tasks.items():
             old_status = task.get("status", "")
@@ -599,6 +638,8 @@ def load_state():
         logger.info(f"Restored: {len(tasks)} tasks, {len(pattern_registry)} patterns, {len(um)} inbox")
     except Exception as e:
         logger.warning(f"load: {e}")
+    global _state_initialized
+    _state_initialized = True
 
 
 def reset_session():
@@ -780,27 +821,77 @@ def calc_total_cost():
     return sum(calc_agent_cost(n) for n in all_names)
 
 # ── Notifications ──
-def send_notification(event_type, message):
+def send_notification(event_type, message, extra=None):
+    """Send notifications to all registered webhooks + legacy config."""
+    targets = []
+    # Legacy single webhook
     url = notification_config.get("url", "")
-    if not url:
-        return
-    allowed = notification_config.get("events", ["task_done", "task_failed", "blocker", "budget_warn"])
-    if event_type not in allowed:
-        return
-    ntype = notification_config.get("type", "generic")
-    try:
-        import urllib.request
-        if ntype == "slack":
-            payload = json.dumps({"text": f"\U0001f916 Multi-Agent: {message}"}).encode()
-        elif ntype == "discord":
-            payload = json.dumps({"content": f"\U0001f916 Multi-Agent: {message}"}).encode()
-        else:
-            payload = json.dumps({"event": event_type, "message": message, "timestamp": datetime.now().isoformat()}).encode()
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=5)
-        add_activity("system", "webhook", "notification", f"{event_type}: {message[:80]}")
-    except Exception as e:
-        logger.warning(f"Notification failed: {e}")
+    if url:
+        allowed = notification_config.get("events", ["task_done", "task_failed", "blocker", "budget_warn"])
+        if event_type in allowed:
+            targets.append({"url": url, "type": notification_config.get("type", "generic"), "events": allowed, "name": "legacy", "active": True})
+    # Registry webhooks
+    for wh in webhook_registry:
+        if not wh.get("active", True):
+            continue
+        if wh.get("events") and event_type not in wh["events"]:
+            continue
+        targets.append(wh)
+    for t in targets:
+        try:
+            import urllib.request
+            ntype = t.get("type", "generic")
+            payload_data = {"event": event_type, "message": message, "timestamp": datetime.now().isoformat()}
+            if extra:
+                payload_data.update(extra)
+            if ntype == "slack":
+                payload = json.dumps({"text": f"\U0001f916 Multi-Agent: {message}"}).encode()
+            elif ntype == "discord":
+                payload = json.dumps({"content": f"\U0001f916 Multi-Agent: {message}"}).encode()
+            else:
+                payload = json.dumps(payload_data).encode()
+            req = urllib.request.Request(t["url"], data=payload, headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=5)
+            add_activity("system", "webhook", "notification", f"{event_type}: {message[:80]}")
+        except Exception as e:
+            logger.warning(f"Notification to {t.get('name', '?')} failed: {e}")
+
+# ── Circuit Breaker Helpers ──
+def _init_circuit(key):
+    if key not in circuit_breakers:
+        circuit_breakers[key] = {"state": "closed", "failures": 0, "last_failure": 0, "cooldown": 120, "threshold": 5, "success_count": 0}
+    return circuit_breakers[key]
+
+def check_circuit(key):
+    cb = _init_circuit(key)
+    if cb["state"] == "closed":
+        return True
+    if cb["state"] == "open":
+        if time.time() - cb["last_failure"] > cb["cooldown"]:
+            cb["state"] = "half_open"
+            cb["success_count"] = 0
+            return True
+        return False
+    return True  # half_open allows through
+
+def record_circuit_success(key):
+    cb = _init_circuit(key)
+    if cb["state"] == "half_open":
+        cb["success_count"] += 1
+        if cb["success_count"] >= 2:
+            cb["state"] = "closed"
+            cb["failures"] = 0
+    elif cb["state"] == "closed":
+        cb["failures"] = max(0, cb["failures"] - 1)
+    bump_version()
+
+def record_circuit_failure(key):
+    cb = _init_circuit(key)
+    cb["failures"] += 1
+    cb["last_failure"] = time.time()
+    if cb["failures"] >= cb["threshold"]:
+        cb["state"] = "open"
+    bump_version()
 
 # ── Git Helper ──
 def git_cmd(args, cwd=None):
@@ -1019,6 +1110,21 @@ def _review_timeout_timer():
                                 bump_version()
                         except (ValueError, TypeError):
                             pass
+                    # Fail stuck reviewer subtasks (in_progress > 20 min)
+                    for sub_id in task.get("_review_subtask_ids", []):
+                        sub = tasks.get(sub_id)
+                        if sub and sub.get("status") == "in_progress":
+                            sub_started = sub.get("started_at", "")
+                            if sub_started:
+                                try:
+                                    sub_time = datetime.fromisoformat(sub_started)
+                                    if (now - sub_time).total_seconds() > 1200:  # 20 min
+                                        sub["status"] = "failed"
+                                        sub["completed_at"] = now.isoformat()
+                                        sub["error_message"] = "Reviewer subtask timeout (20 min)"
+                                        logger.info(f"Reviewer subtask #{sub_id} timed out (20 min)")
+                                except (ValueError, TypeError):
+                                    pass
                 elif task.get("status") == "in_testing":
                     started = task.get("_testing_started_at", "")
                     if not started:
