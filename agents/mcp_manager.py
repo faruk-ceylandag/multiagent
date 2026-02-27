@@ -524,8 +524,13 @@ def check_mcp_health(ctx, needed_names, timeout=3):
         spec = REGISTRY.get(name, {})
         if spec.get("type") in ("http", "sse") and spec.get("url"):
             try:
-                from urllib.request import urlopen
-                urlopen(spec["url"], timeout=timeout)
+                from urllib.request import urlopen, HTTPError
+                try:
+                    urlopen(spec["url"], timeout=timeout)
+                except HTTPError as he:
+                    # 401/403 = server reachable, auth handled by Claude OAuth
+                    if he.code not in (401, 403):
+                        raise
                 healthy.add(name)
             except Exception:
                 log(ctx, f"⚠ MCP {name} unreachable ({spec.get('url', '')[:60]})")

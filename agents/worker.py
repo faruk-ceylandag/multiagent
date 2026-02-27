@@ -451,28 +451,11 @@ def _prefetch_url_content(ctx, task_text):
                     continue
             except Exception:
                 pass
-            # Fallback: use claude CLI with haiku for a quick MCP read
-            try:
-                _haiku = getattr(ctx, "MODEL_HAIKU", "claude-haiku-4-5-20251001")
-                fetch_prompt = f"Read Jira ticket {issue_key} using mcp__atlassian__getJiraIssue. Output ONLY: Title, Status, Priority, Description (first 500 chars), and Acceptance Criteria. No commentary."
-                proc = subprocess.run(
-                    ["claude", "-p", fetch_prompt, "--model", _haiku,
-                     "--allowedTools", "mcp__*,Read,Bash(jq*),Bash(cat*)",
-                     "--output-format", "text", "--max-turns", "3"],
-                    capture_output=True, text=True, timeout=45,
-                    cwd=ctx.AGENT_CWD,
-                    env={**os.environ, **_load_creds_env(ctx)},
-                )
-                if proc.returncode == 0 and proc.stdout.strip():
-                    content = proc.stdout.strip()[:2000]
-                    results.append(f"[JIRA {issue_key}]\n{content}")
-                    # Cache it for agents
-                    hub_post(ctx, "/cache", {"key": f"jira_{issue_key}", "content": content,
-                                             "source": "jira", "description": f"Jira ticket {issue_key}"})
-                    log(ctx, f"📋 Pre-fetched Jira {issue_key}")
-                    continue
-            except Exception as e:
-                log(ctx, f"⚠ Jira pre-fetch failed: {e}")
+            # SSE MCP (atlassian) uses OAuth — can't pre-fetch via subprocess.
+            # Inject a note so the agent reads it via MCP in its own session.
+            results.append(f"[JIRA {issue_key}]\nUse mcp__atlassian__getJiraIssue(issueIdOrKey=\"{issue_key}\") to read this ticket's details.")
+            log(ctx, f"📋 Jira {issue_key} — agent will fetch via MCP")
+            continue
 
         # ── GitHub ──
         gh_issue = re.search(r'github\.com/([^/]+/[^/]+)/(?:issues|pull)/(\d+)', url_clean)
