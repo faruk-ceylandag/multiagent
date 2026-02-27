@@ -195,11 +195,18 @@ def classify_intent(msg: str = ""):
             _intent_cache.move_to_end(text)
             return {"intent": _intent_cache[text]}
 
+    # Fast path: URLs, ticket IDs, and file paths are always tasks
+    low = text.lower()
+    if re.search(r'https?://', low) or re.search(r'\b[A-Z]{2,10}-\d+\b', text) or re.search(r'\.\w{2,4}\b', low):
+        with _intent_cache_lock:
+            _intent_cache[text] = "task"
+        return {"intent": "task"}
+
     # Try AI classification
     try:
         prompt = (
             "Classify as 'task' or 'chat'. Reply with ONE word only. "
-            "Task = work request, bug fix, feature, implementation, code change. "
+            "Task = work request, bug fix, feature, implementation, code change, URL, ticket ID, Jira link. "
             "Chat = question, greeting, status check, acknowledgment."
         )
         result = subprocess.run(
