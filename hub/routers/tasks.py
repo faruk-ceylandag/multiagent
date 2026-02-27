@@ -1352,6 +1352,55 @@ def approve_plan(data: dict):
             add_activity(plan.get("created_by", "architect"), task["assigned_to"] or "?",
                          "task_create", task["description"][:100])
 
+        # ── QA enforce: if no step is assigned to QA, auto-add QA task ──
+        dev_task_ids = [ct["task_id"] for ct in created_tasks]
+        has_qa = any(tasks[ct["task_id"]].get("assigned_to") == "qa" for ct in created_tasks)
+        if not has_qa and dev_task_ids:
+            qa_tid = max(tasks.keys(), default=0) + 1
+            qa_task = {
+                "id": qa_tid,
+                "description": f"QA: Verify and test all changes from plan #{plan_id}. Run lint, tests, review code quality.",
+                "assigned_to": "qa",
+                "status": "to_do",
+                "depends_on": list(dev_task_ids),
+                "project": plan.get("project", ""),
+                "branch": plan_shared_branch or "",
+                "task_external_id": plan_shared_ext_id or "",
+                "parent_id": None,
+                "priority": 5,
+                "created": datetime.now().isoformat(),
+                "started_at": "", "completed_at": "",
+                "created_by": "system",
+                "plan_id": plan_id,
+            }
+            tasks[qa_tid] = qa_task
+            created_tasks.append({"step_index": -1, "task_id": qa_tid})
+            add_activity("system", "qa", "task_create", f"Auto QA for plan #{plan_id}")
+
+        # ── Architect supervisor task: track all subtasks ──
+        all_task_ids = [ct["task_id"] for ct in created_tasks]
+        arch_tid = max(tasks.keys(), default=0) + 1
+        plan_summary = plan.get("summary", plan.get("description", ""))[:120]
+        arch_task = {
+            "id": arch_tid,
+            "description": f"Supervise plan #{plan_id}: {plan_summary} — track subtasks, ensure completion",
+            "assigned_to": "architect",
+            "status": "to_do",
+            "depends_on": list(all_task_ids),
+            "project": plan.get("project", ""),
+            "branch": plan_shared_branch or "",
+            "task_external_id": plan_shared_ext_id or "",
+            "parent_id": None,
+            "priority": 3,
+            "created": datetime.now().isoformat(),
+            "started_at": "", "completed_at": "",
+            "created_by": "system",
+            "plan_id": plan_id,
+        }
+        tasks[arch_tid] = arch_task
+        created_tasks.append({"step_index": -2, "task_id": arch_tid})
+        add_activity("system", "architect", "task_create", f"Supervisor for plan #{plan_id}")
+
         plan["status"] = "approved"
         plan["approved_at"] = datetime.now().isoformat()
         plan["created_task_ids"] = [ct["task_id"] for ct in created_tasks]

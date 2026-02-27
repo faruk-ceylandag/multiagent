@@ -58,7 +58,7 @@ def load_config(workspace: str) -> dict:
         "auto_scale": {"enabled": False, "min_agents": 2, "max_agents": 8, "queue_threshold": 3},
         "auto_uat": False,              # True → skip UAT, go directly to done
         "auto_uat_timeout": 0,          # >0 → N seconds, auto-approve UAT after timeout (0 = manual)
-        "auto_plan_approval": False,    # True → auto-approve all plans
+        "auto_plan_approval": True,     # True → auto-approve all plans
         "auto_plan_single_step": True,  # True → auto-approve single-step plans
         "escalation_threshold": 3,      # N failures → escalate to architect
         "add_dirs": [],                   # Extra directories accessible to all agents via --add-dir
