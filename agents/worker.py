@@ -1722,6 +1722,7 @@ RULES:
             # Reviewer/QA agents must NOT change the original task status —
             # they submit verdicts via POST /tasks/{tid}/review or set status via curl.
             # The hub manages the task lifecycle for reviewed/tested tasks.
+            _is_reviewer_or_qa = ctx.AGENT_NAME.startswith("reviewer-") or ctx.AGENT_NAME == "qa"
             if _is_reviewer_or_qa:
                 if ctx.AGENT_NAME.startswith("reviewer-"):
                     # Parse verdict from Claude's output and auto-submit

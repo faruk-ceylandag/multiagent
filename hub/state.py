@@ -666,7 +666,6 @@ def reset_session():
                     task["completed_at"] = datetime.now().isoformat()
             elif task.get("status") in ("in_progress", "code_review", "in_testing"):
                 task["status"] = "to_do"
-                task.pop("assigned_to", None)
                 task.pop("review_dispatched_at", None)
                 task.pop("_review_subtask_ids", None)
         # Dismiss stale pending plans
@@ -674,7 +673,6 @@ def reset_session():
             if plan.get("status") == "pending":
                 plan["status"] = "dismissed"
         # Clear volatile state
-        task_reviews.clear()
         messages.clear()
         analytics_log.clear()
         activity.clear()
@@ -695,19 +693,13 @@ def reset_session():
                         os.remove(fp)
                 except OSError:
                     pass
-        # Clear log buffers (old session logs)
+        # Add restart separator to logs (preserve history)
+        _restart_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for name in log_buffers:
-            log_buffers[name].clear()
-            log_counters[name] = 0
-        # Truncate log files on disk
+            log_buffers[name].append(f"──── session restart at {_restart_ts} ────")
         if LOG_DIR:
             for name in ALL_AGENTS:
-                lf = _log_file(name)
-                if lf and os.path.exists(lf):
-                    try:
-                        open(lf, "w").close()
-                    except OSError:
-                        pass
+                _append_log_disk(name, [f"──── session restart at {_restart_ts} ────"])
         # NOTE: workspace_registry is NOT cleared — workspaces persist across sessions
         bump_version()
         save_state()
