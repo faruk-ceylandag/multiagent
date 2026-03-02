@@ -114,9 +114,9 @@ def _is_single_file_task(prompt):
 def classify_prompt(prompt, role="", model_policy=None):
     """Classify prompt into model tier: opus/sonnet/haiku.
     Role-aware: architect always sonnet, reviewers always haiku, system notifications capped at sonnet."""
-    # Architect only delegates — haiku is sufficient for URL read + plan curl
+    # Architect creates task descriptions & ACs — needs sonnet quality
     if role == "architect":
-        return "haiku"
+        return "sonnet"
     # Logic reviewer uses sonnet (catches bugs, race conditions, edge cases)
     # Other reviewers use haiku — simple style/arch checks
     if role and role.startswith("reviewer"):
