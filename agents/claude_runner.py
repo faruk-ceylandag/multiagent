@@ -248,7 +248,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
     ctx.claude_calls += 1
     ctx.task_calls += 1
     model = pick_model(ctx, prompt, force=force_model)
-    model_tag = "opus" if "opus" in model else "sonnet" if "sonnet" in model else model.split("-")[0]
+    model_tag = "opus" if "opus" in model else "sonnet" if "sonnet" in model else "haiku" if "haiku" in model else model.split("-")[0]
     prompt = truncate_context(ctx, prompt)
     _model_failed = False
     succeeded = False
@@ -260,6 +260,11 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
             model = ctx.MODEL_SONNET
             model_tag = "sonnet"
             log(ctx, f"↓ Falling back to {model_tag}")
+            _model_failed = False
+        elif _model_failed and "haiku" in model:
+            model = ctx.MODEL_SONNET
+            model_tag = "sonnet"
+            log(ctx, f"↑ Escalating from haiku to {model_tag}")
             _model_failed = False
         try:
             log(ctx, f"▶ claude #{ctx.claude_calls} [{model_tag}] ({len(prompt)} chars)")
@@ -274,7 +279,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                 # Architect delegates fast — only MCP reads + curl for plan proposal
                 # Block: Glob, Grep, Task, WebFetch, WebSearch, AskUserQuestion, EnterPlanMode
                 cmd.extend(["--allowedTools", "Read,Bash(curl*),Bash(jq*),Bash(cat*),mcp__*"])
-                cmd.extend(["--disallowedTools", "Glob,Grep,Task,WebFetch,WebSearch,AskUserQuestion,EnterPlanMode,ExitPlanMode"])
+                cmd.extend(["--disallowedTools", "Glob,Grep,TaskCreate,TaskUpdate,TaskGet,TaskList,WebFetch,WebSearch,AskUserQuestion,EnterPlanMode,ExitPlanMode"])
             else:
                 cmd.extend(["--allowedTools", "Edit,Write,Read,Bash(*),mcp__*"])
 
@@ -302,6 +307,9 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
             elif "sonnet" in model:
                 _haiku = getattr(ctx, "MODEL_HAIKU", "claude-haiku-4-5-20251001")
                 cmd.extend(["--fallback-model", _haiku])
+            elif "haiku" in model:
+                # Haiku can escalate to sonnet as fallback
+                cmd.extend(["--fallback-model", ctx.MODEL_SONNET])
 
             # ── Per-call budget limit ──
             budget = getattr(ctx, 'BUDGET_LIMIT', 0)
@@ -504,6 +512,9 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                         if sid and sid != ctx.SESSION_ID:
                             ctx.SESSION_ID = sid
                             save_session(ctx)
+                            # Store actual CLI session for task-specific resume
+                            if ctx.current_task_id:
+                                ctx.set_task_session(ctx.current_task_id, sid)
                         usage = evt.get("usage") or {}
                         if isinstance(usage, dict) and usage:
                             log(ctx, f"  tokens: {format_tokens_comma(usage.get('input_tokens', 0))} in / {format_tokens_comma(usage.get('output_tokens', 0))} out [{model_tag}]")
@@ -535,6 +546,16 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                 except subprocess.TimeoutExpired:
                     code = -9
             t.join(timeout=5)
+            # Fallback: if stderr thread missed data, try direct read
+            if not stderr_lines and proc.stderr:
+                try:
+                    leftover = proc.stderr.read()
+                    if leftover:
+                        for _sl in leftover.decode("utf-8", errors="replace").strip().split("\n"):
+                            if _sl.strip():
+                                stderr_lines.append(_sl.strip())
+                except Exception:
+                    pass
             log(ctx, f"◼ exit={code}, {out_lines} lines, {tool_count} tools")
 
             if code == 0:
@@ -562,6 +583,13 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                     _model_failed = False  # Don't downgrade model for server errors
                 else:
                     log(ctx, f"⚠ exit={code} with no stderr — model may be unavailable")
+                    # Diagnostic: log the command (redact prompt) for debugging silent failures
+                    _cmd_debug = [c for c in cmd if c != prompt]
+                    log(ctx, f"  cmd: {' '.join(_cmd_debug[:20])}")
+                    if out_lines == 0:
+                        log(ctx, f"  ⚠ Zero stdout — CLI crashed before producing any output")
+                        # Clear session so retry starts fresh (no --resume)
+                        ctx.SESSION_ID = None
                     _model_failed = True
 
             err_lower = (stderr_text + " " + " ".join(ctx._last_output_lines[-5:] if ctx._last_output_lines else [])).lower()

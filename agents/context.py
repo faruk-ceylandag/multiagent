@@ -109,15 +109,16 @@ class AgentContext:
     _SESSION_MAP_MAX = 100
 
     def get_task_session(self, task_id):
-        """Deterministic session ID: same task always resumes the same session."""
-        if task_id not in self._session_map:
-            # LRU eviction: cap at _SESSION_MAP_MAX entries
-            if len(self._session_map) >= self._SESSION_MAP_MAX:
-                oldest = next(iter(self._session_map))
-                del self._session_map[oldest]
-            namespace = uuid.UUID('12345678-1234-5678-1234-567812345678')
-            self._session_map[task_id] = str(uuid.uuid5(namespace, f"{task_id}-{self.AGENT_NAME}"))
-        return self._session_map[task_id]
+        """Get stored CLI session ID for a task (None if not yet established).
+        Only returns sessions that were actually created by the CLI."""
+        return self._session_map.get(task_id)
+
+    def set_task_session(self, task_id, session_id):
+        """Store the actual CLI session ID for a task after successful call."""
+        if len(self._session_map) >= self._SESSION_MAP_MAX:
+            oldest = next(iter(self._session_map))
+            del self._session_map[oldest]
+        self._session_map[task_id] = session_id
 
     def get_workspace_path(self, workspace_id):
         """Get filesystem path for a workspace ID."""
