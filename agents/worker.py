@@ -1703,7 +1703,6 @@ RULES:
         # Resource cleanup
         ctx.session_tokens = 0
         ctx.task_calls = 0
-        ctx._last_output_lines = []
         # Clear file plan after task completion
         try:
             hub_post(ctx, "/files/plan", {"agent_name": ctx.AGENT_NAME, "files": [], "task_id": ""})
@@ -1742,7 +1741,7 @@ RULES:
                                                detail="Could not parse review verdict from output")
                     # Mark own subtask as done (if it's a review subtask)
                     if ctx._review_parent_id and ctx.current_task_id != ctx._review_parent_id:
-                        _sub_status = "done" if (verdict == "approve" or not verdict) else "failed"
+                        _sub_status = "done" if verdict == "approve" else "failed"
                         update_task_status(ctx, ctx.current_task_id, _sub_status)
                 elif ctx.AGENT_NAME == "qa" or any(h in ctx.AGENT_NAME.lower() for h in ("qa", "test", "quality")):
                     # QA agent: update parent task status + mark own task done
@@ -1797,6 +1796,8 @@ RULES:
             hub_post(ctx, "/agents/specialization", {"agent_name": ctx.AGENT_NAME,
                 "task_type": ctx.current_project or "general", "success": task_ok,
                 "classified_type": _task_type})
+
+        ctx._last_output_lines = []
 
         if not _skip_unlock:
             unlock_all(ctx)

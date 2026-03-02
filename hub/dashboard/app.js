@@ -2281,7 +2281,14 @@ function _cmdContext() {
 }
 
 async function _runCheck(type, args) {
-  let tid = (args || '').trim().replace('#', '');
+  const trimmed = (args || '').trim();
+  // Jira URL detection
+  const jiraMatch = trimmed.match(/atlassian\.net\/browse\/([A-Z]+-\d+)/);
+  if (jiraMatch) { _runJiraCheck(type, jiraMatch[1], trimmed); return; }
+  if (trimmed.includes('atlassian.net') && !jiraMatch) {
+    toast('Invalid Jira URL. Expected: https://xxx.atlassian.net/browse/PROJ-123', 'error'); return;
+  }
+  let tid = trimmed.replace('#', '');
   if (!tid) {
     const tasks_arr = data.tasks || [];
     const recent = tasks_arr.filter(t => ['done', 'in_progress'].includes(t.status))
@@ -2324,6 +2331,43 @@ async function startCheck(type, tid) {
     });
     toast(`${type} check assigned to ${target}`, 'success', 3000);
   } catch { toast('Failed to start check', 'error'); }
+}
+
+function _runJiraCheck(type, issueKey, jiraUrl) {
+  const names = data.agent_names || [];
+  const target = type === 'qa'
+    ? (names.find(n => n === 'qa') || names[0])
+    : (names.find(n => n !== 'architect' && n !== 'qa') || names[0]);
+  const overlay = document.createElement('div'); overlay.className = 'modal-overlay';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  overlay.innerHTML = `<div class="modal-box" style="width:560px">
+    <h3>${type === 'dev' ? '🔍 Jira Dev Check' : '🧪 Jira QA Check'} — ${esc(issueKey)}</h3>
+    <div style="margin:10px 0;font-size:12px;color:var(--fg2)">
+      Analyse Jira ticket <strong>${esc(issueKey)}</strong> for codebase impact.
+    </div>
+    <div style="margin:10px 0;font-size:11px">
+      URL: <code>${esc(jiraUrl)}</code><br>
+      Agent: <strong>${esc(target)}</strong>
+    </div>
+    <div class="modal-actions">
+      <button class="modal-btn-ok" onclick="startJiraCheck('${type}', '${esc(issueKey)}', '${esc(jiraUrl)}', '${esc(target)}'); this.closest('.modal-overlay').remove()">
+        ▶ Run ${type === 'dev' ? 'Dev' : 'QA'} Check
+      </button>
+      <button class="modal-btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+}
+
+async function startJiraCheck(type, issueKey, jiraUrl, agent) {
+  toast(`Starting Jira ${type} check on ${issueKey}...`, 'info', 3000);
+  try {
+    await fetch(HUB + '/tasks/check/jira', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ check_type: type, issue_key: issueKey, jira_url: jiraUrl, agent })
+    });
+    toast(`Jira ${type} check assigned to ${agent}`, 'success', 3000);
+  } catch { toast('Failed to start Jira check', 'error'); }
 }
 
 function _updateSlashHint(text) {
@@ -2450,8 +2494,8 @@ const _slashCommands={
   '/clear':{desc:'Clear log view',args:''},
   '/export':{desc:'Export session (Alt=JSON)',args:'[format]'},
   '/budget':{desc:'Set cost budget',args:'<amount>'},
-  '/dev-check':{desc:'Run dev check on task',args:'[#task-id]'},
-  '/qa-check':{desc:'Run QA check on task',args:'[#task-id]'},
+  '/dev-check':{desc:'Run dev check on task',args:'[#task-id | jira-url]'},
+  '/qa-check':{desc:'Run QA check on task',args:'[#task-id | jira-url]'},
   '/context':{desc:'Show agent context info',args:''},
   '/theme':{desc:'Toggle light/dark theme',args:''},
   '/connect':{desc:'Connect external service',args:'[service]'},

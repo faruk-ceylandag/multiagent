@@ -286,12 +286,10 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
             else:
                 cmd.extend(["--allowedTools", "Edit,Write,Read,Bash(*),mcp__*"])
 
-            # ── Output format: json-schema forces json, otherwise stream-json ──
+            # ── Output format: always stream-json so the parser gets dict events ──
+            cmd.extend(["--output-format", "stream-json"])
             if json_schema:
-                cmd.extend(["--output-format", "json"])
                 cmd.extend(["--json-schema", json_schema])
-            else:
-                cmd.extend(["--output-format", "stream-json"])
             cmd.append("--verbose")
             cmd.extend(["--model", model])
 
@@ -427,6 +425,8 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                 line = raw.decode("utf-8", errors="replace").rstrip()
                 try:
                     evt = json.loads(line)
+                    if not isinstance(evt, dict):
+                        continue
                     tt = evt.get("type", "")
 
                     if tt == "assistant":
@@ -525,7 +525,7 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                             report_progress(ctx, "call_done", f"{tool_count} tools, {usage.get('output_tokens', 0)} out")
                         elif evt.get("cost_usd"):
                             # Fallback: use cost_usd directly if usage missing
-                            report_progress(ctx, "call_done", f"{tool_count} tools, ${evt['cost_usd']:.4f}")
+                            report_progress(ctx, "call_done", f"{tool_count} tools, ${evt.get('cost_usd', 0):.4f}")
                 except json.JSONDecodeError:
                     if line.strip():
                         print(line, flush=True)

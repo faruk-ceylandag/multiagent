@@ -827,6 +827,174 @@ After generating the report, send it to user with: curl -s -X POST $HUB/messages
         bump_version()
     return {"status": "ok", "agent": agent, "check_type": check_type}
 
+
+def _build_jira_dev_prompt(issue_key: str, jira_url: str, agent: str) -> str:
+    return f"""JIRA DEV IMPACT ANALYSIS — {issue_key}
+Jira URL: {jira_url}
+
+INSTRUCTIONS:
+1. Fetch the Jira ticket using the Atlassian MCP tool:
+   Use mcp__atlassian__getJiraIssue with issueIdOrKey="{issue_key}"
+
+2. Extract from the ticket:
+   - Title, description, acceptance criteria
+   - Subtasks and linked issues
+   - Priority, labels, components
+
+3. Codebase impact analysis — search for affected files/modules:
+   - Grep for keywords from the ticket (feature names, component names, API endpoints)
+   - Check file structure: models, routes, controllers, services, configs
+   - Trace import chains for affected modules
+   - Identify API endpoints that would change
+
+4. Generate a comprehensive impact report in this format:
+
+### Dev Impact Analysis — {issue_key}
+**Ticket:** [title from Jira]
+**URL:** {jira_url}
+
+#### Summary
+[2-3 sentence overview of what needs to change]
+
+#### Affected Files
+| File | Module | Expected Changes | Risk |
+|------|--------|-----------------|------|
+| path | module | description | Low/Med/High |
+
+#### API Changes
+- [endpoints that need modification or creation]
+
+#### Database / Schema Changes
+- [any model or migration changes needed]
+
+#### Dependencies
+- [new packages, internal module dependencies affected]
+
+#### Architecture Impact
+- [how this fits into existing patterns, any refactoring needed]
+
+#### Risk Assessment
+- **Complexity:** Low/Medium/High
+- **Regression risk:** [areas that could break]
+- **Cross-cutting concerns:** [auth, caching, logging, etc.]
+
+#### Implementation Notes
+- [suggested approach, gotchas, order of operations]
+
+5. Save the report to: $WORKSPACE/.multiagent/reports/dev-check_{issue_key}_$(date +%Y%m%d_%H%M%S).md
+   Create the reports directory if it doesn't exist: mkdir -p "$WORKSPACE/.multiagent/reports"
+
+6. Send the report to user:
+   curl -s -X POST $HUB/messages -H 'Content-Type: application/json' -d '{{"sender":"{agent}","receiver":"user","content":"REPORT_HERE","msg_type":"check_report"}}'"""
+
+
+def _build_jira_qa_prompt(issue_key: str, jira_url: str, agent: str) -> str:
+    return f"""JIRA QA ANALYSIS — {issue_key}
+Jira URL: {jira_url}
+
+INSTRUCTIONS:
+1. Fetch the Jira ticket using the Atlassian MCP tool:
+   Use mcp__atlassian__getJiraIssue with issueIdOrKey="{issue_key}"
+
+2. Extract from the ticket:
+   - Title, description, acceptance criteria
+   - Subtasks and linked issues
+   - Priority, labels, components
+
+3. QA analysis:
+   - Map each acceptance criterion to concrete test scenarios
+   - Search the codebase for existing tests related to this feature
+   - Identify test coverage gaps
+   - Analyze regression risk areas
+   - Check for edge cases, error scenarios, boundary conditions
+   - Review security implications (auth, input validation, injection)
+   - Review performance implications (N+1 queries, large payloads, caching)
+
+4. Generate a comprehensive QA report in this format:
+
+### QA Analysis — {issue_key}
+**Ticket:** [title from Jira]
+**URL:** {jira_url}
+
+#### Acceptance Criteria → Test Scenarios
+| AC | Test Scenario | Type | Priority |
+|----|--------------|------|----------|
+| criterion | test description | Unit/Integration/E2E | P0/P1/P2 |
+
+#### Existing Test Coverage
+- [relevant test files found]
+- [coverage gaps identified]
+
+#### Regression Risk Areas
+- [modules/features that could break]
+- [integration points to verify]
+
+#### Edge Cases & Boundary Conditions
+- [list of edge cases to test]
+
+#### Security Considerations
+- [auth, validation, injection risks]
+
+#### Performance Considerations
+- [queries, payload sizes, caching concerns]
+
+#### Manual Test Plan
+1. [step-by-step manual test scenarios]
+
+#### Recommended Test Strategy
+- **Must test:** [critical paths]
+- **Should test:** [important but lower risk]
+- **Nice to test:** [edge cases if time permits]
+
+5. Save the report to: $WORKSPACE/.multiagent/reports/qa-check_{issue_key}_$(date +%Y%m%d_%H%M%S).md
+   Create the reports directory if it doesn't exist: mkdir -p "$WORKSPACE/.multiagent/reports"
+
+6. Send the report to user:
+   curl -s -X POST $HUB/messages -H 'Content-Type: application/json' -d '{{"sender":"{agent}","receiver":"user","content":"REPORT_HERE","msg_type":"check_report"}}'"""
+
+
+@router.post("/tasks/check/jira")
+def request_jira_check(data: dict):
+    """Request a dev-check or qa-check for a Jira ticket (no internal task needed)."""
+    check_type = data.get("check_type", "dev")
+    issue_key = data.get("issue_key", "")
+    jira_url = data.get("jira_url", "")
+    agent = data.get("agent", "")
+
+    if not issue_key or not re.match(r"^[A-Z]+-\d+$", issue_key):
+        return {"status": "error", "message": f"Invalid issue key: {issue_key}"}
+
+    # Pick a sensible agent if none provided
+    if not agent:
+        visible = [a for a in ALL_AGENTS if a not in HIDDEN_AGENTS]
+        if check_type == "qa":
+            agent = next((a for a in visible if any(h in a.lower() for h in _QA_AGENT_HINTS)), None)
+        else:
+            agent = next((a for a in visible if a not in _QA_AGENT_HINTS and a != "architect"), None)
+        if not agent and visible:
+            agent = visible[0]
+        if not agent:
+            return {"status": "error", "message": "No available agent"}
+
+    if check_type == "qa":
+        prompt = _build_jira_qa_prompt(issue_key, jira_url, agent)
+    else:
+        prompt = _build_jira_dev_prompt(issue_key, jira_url, agent)
+
+    with lock:
+        ts = datetime.now().isoformat()
+        messages.setdefault(agent, []).append({
+            "sender": "user", "receiver": agent,
+            "content": prompt,
+            "msg_type": "task",
+            "timestamp": ts,
+        })
+        add_activity("user", agent, f"jira_{check_type}_check",
+                     f"Requested Jira {check_type} check on {issue_key}")
+        bump_version()
+    return {"status": "ok", "agent": agent, "check_type": check_type, "issue_key": issue_key}
+
+
 @router.get("/tasks")
 def get_tasks(status: str = "", assigned_to: str = ""):
     # No lock — read-only, GIL-safe
@@ -1078,6 +1246,8 @@ def submit_review(tid: int, data: dict):
         return {"status": "error", "message": "agent required"}
 
     review_comments = data.get("comments", [])
+    if not isinstance(review_comments, list):
+        review_comments = []
     with lock:
         if tid not in tasks:
             return {"status": "not_found"}
@@ -1101,6 +1271,8 @@ def submit_review(tid: int, data: dict):
         # Add review comments to task_comments
         import hub.state as _st
         for rc in review_comments[:20]:
+            if not isinstance(rc, dict):
+                continue
             _st._comment_counter += 1
             task_comments.setdefault(tid_str, []).append({
                 "id": _st._comment_counter,
@@ -1188,6 +1360,8 @@ def submit_review(tid: int, data: dict):
                     rv = reviews.get(r, {})
                     if rv.get("verdict") == "request_changes":
                         for c in rv.get("comments", []):
+                            if not isinstance(c, dict):
+                                continue
                             all_issues.append(f"[{r}] {c.get('file', '')}:{c.get('line', '')} — {c.get('text', '')}")
                 feedback = "\n".join(all_issues) if all_issues else "Reviewers requested changes. Check review comments."
                 ts = datetime.now().isoformat()
