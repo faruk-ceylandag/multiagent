@@ -1523,7 +1523,8 @@ RULES:
 {{learned_patterns}}""")
 
         # ── File plan: submit intended files for conflict detection (BEFORE render_template so lock_ctx is complete) ──
-        if is_task and ctx.current_project and not _is_architect:
+        _is_reviewer = ctx.AGENT_NAME.startswith("reviewer-")
+        if is_task and ctx.current_project and not _is_architect and not _is_reviewer:
             try:
                 _file_plan = _analyze_likely_files(ctx, task_text, ctx.current_project)
                 if _file_plan:
@@ -1638,16 +1639,13 @@ RULES:
                 log(ctx, f"⚠ verify failed on {ctx.current_project} — changes preserved (use Retry to reattempt)")
                 hub_msg(ctx, "user", f"⚠️ {ctx.AGENT_NAME}: task on {ctx.current_project} finished but verify failed. Changes are preserved — you can Retry the task or manually review.", "info")
             else:
-                # Stage changes and send for user review instead of auto-committing
+                # Collect changes for review panel — do NOT stage/commit (files stay locked)
                 proj_dir = os.path.join(ctx.WORKSPACE, ctx.current_project)
                 git_changed_files(ctx, ctx.current_project)
                 _, diff_stat = git(ctx, ["diff", "--stat"], proj_dir)
                 _, diff_cached = git(ctx, ["diff", "--cached", "--stat"], proj_dir)
                 _, untracked = git(ctx, ["ls-files", "--others", "--exclude-standard"], proj_dir)
                 summary = (diff_stat + "\n" + diff_cached + "\n" + untracked).strip()
-                # Stage everything for review (exclude .claude/, .multiagent/ etc.)
-                from .git_ops import git_add_safe
-                git_add_safe(ctx, proj_dir)
                 # Collect full diff for review panel
                 collect_changes(ctx, msgs[0].get("content", "")[:200], ctx.current_project)
                 # Build suggested commit message: TASK-ID | Clean Title
@@ -1686,9 +1684,9 @@ RULES:
                     suggested_msg = f"TASK-{ctx.current_task_id} | {task_title}"
                 else:
                     suggested_msg = f"{ctx.AGENT_NAME} | {task_title}"
-                log(ctx, f"📋 Changes staged for review ({ctx.current_project})")
+                log(ctx, f"🔒 Changes locked for review ({ctx.current_project})")
                 hub_msg(ctx, "user",
-                    f"✅ {ctx.AGENT_NAME}: task complete, changes ready for review.\n\n"
+                    f"✅ {ctx.AGENT_NAME}: task complete, changes locked for review.\n\n"
                     f"Project: {ctx.current_project} | Branch: {cur_br or 'N/A'}\n"
                     f"Files:\n{summary[:500]}",
                     "review_request",

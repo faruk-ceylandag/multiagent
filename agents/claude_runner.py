@@ -280,6 +280,9 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                 # Block: Glob, Grep, Task, WebFetch, WebSearch, AskUserQuestion, EnterPlanMode
                 cmd.extend(["--allowedTools", "Read,Bash(curl*),Bash(jq*),Bash(cat*),mcp__*"])
                 cmd.extend(["--disallowedTools", "Glob,Grep,TaskCreate,TaskUpdate,TaskGet,TaskList,WebFetch,WebSearch,AskUserQuestion,EnterPlanMode,ExitPlanMode"])
+            elif ctx.AGENT_NAME.startswith("reviewer-"):
+                # Reviewers are read-only — no file editing
+                cmd.extend(["--allowedTools", "Read,Bash(curl*),Bash(cat*),Bash(git diff*),Bash(git log*),Bash(git show*),mcp__*"])
             else:
                 cmd.extend(["--allowedTools", "Edit,Write,Read,Bash(*),mcp__*"])
 
