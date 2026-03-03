@@ -1499,9 +1499,8 @@ def approve_plan(data: dict):
     # Form values for {{placeholder}} substitution in step descriptions
     form_values = data.get("form_values", {})
 
-    # ── Self-execute: consolidate all steps into ONE task for the plan creator ──
+    # ── Self-execute: send execute message directly to creator (no kanban task) ──
     if plan.get("self_execute", False):
-        created_tasks = []
         with lock:
             # Build consolidated description from all selected steps
             consolidated_parts = []
@@ -1524,84 +1523,41 @@ def approve_plan(data: dict):
                 + "\n\n---\n\n".join(consolidated_parts)
             )
 
-            # Resolve branch (same logic as normal path)
-            plan_branch = plan.get("branch", "").strip()
-            plan_ext_id = ""
-            first_step = steps[sorted(selected)[0]] if sorted(selected) else {}
-            step_ext_id = first_step.get("task_external_id", "").strip()
-            if step_ext_id:
-                plan_branch = step_ext_id if step_ext_id.startswith("feature/") else f"feature/{step_ext_id}"
-                plan_ext_id = step_ext_id
-            elif plan_branch and plan_branch not in ("main", "master", "develop", ""):
-                plan_ext_id = plan_branch.replace("feature/", "")
-                plan_branch = plan_branch if plan_branch.startswith("feature/") else f"feature/{plan_branch}"
-
-            tid = max(tasks.keys(), default=0) + 1
             creator = plan.get("created_by", "architect")
-            task = {
-                "id": tid,
-                "description": full_desc,
-                "assigned_to": creator,
-                "status": "to_do",
-                "depends_on": [],
-                "project": plan.get("project", ""),
-                "branch": plan_branch,
-                "task_external_id": plan_ext_id,
-                "parent_id": None,
-                "priority": 3,
-                "created": datetime.now().isoformat(),
-                "started_at": "", "completed_at": "",
-                "created_by": creator,
-                "plan_id": plan_id,
-                "_self_execute": True,
-                "skip_review": True,
-            }
-            tasks[tid] = task
-            created_tasks.append({"step_index": -1, "task_id": tid})
-            add_activity(creator, creator, "task_create", f"Self-execute plan #{plan_id} ({n_steps} steps)")
-
-            # No QA auto-inject (skill includes its own QA steps)
-            # No architect supervisor task (architect IS the executor)
 
             plan["status"] = "approved"
             plan["approved_at"] = datetime.now().isoformat()
-            plan["created_task_ids"] = [tid]
+
+            # Mark parent task as done (no subtask to track on kanban)
+            parent_tid = plan.get("task_id", "")
+            if parent_tid and str(parent_tid).isdigit():
+                ptid = int(parent_tid)
+                if ptid in tasks:
+                    tasks[ptid]["status"] = "done"
+                    tasks[ptid]["completed_at"] = datetime.now().isoformat()
 
             # Notify user
             ts = datetime.now().isoformat()
             messages.setdefault("user", []).append({
                 "sender": "system", "receiver": "user",
-                "content": f"Plan #{plan_id} approved (direct execution) — 1 consolidated task with {n_steps} steps assigned to {creator}.",
+                "content": f"Plan #{plan_id} approved — executing {n_steps} steps directly (no kanban task).",
                 "msg_type": "info", "timestamp": ts,
             })
 
-            # Auto-start immediately (no deps)
-            task["status"] = "in_progress"
-            task["started_at"] = ts
+            # Send execute message directly to creator (no kanban task created)
             messages.setdefault(creator, []).append({
                 "sender": "user",
                 "receiver": creator,
-                "content": f"#{tid} {full_desc}",
-                "msg_type": "task",
-                "task_id": str(tid),
-                "project": task.get("project", ""),
-                "branch": task.get("branch", ""),
-                "task_external_id": task.get("task_external_id", ""),
+                "content": full_desc,
+                "msg_type": "execute",
                 "timestamp": ts,
             })
 
-            # Parent task link
-            parent_tid = plan.get("task_id", "")
-            if parent_tid and str(parent_tid).isdigit():
-                ptid = int(parent_tid)
-                if ptid in tasks:
-                    tasks[ptid]["_plan_subtask_ids"] = [tid]
-                    tasks[ptid]["_plan_id"] = plan_id
-
+            add_activity(creator, creator, "task_create", f"Self-execute plan #{plan_id} ({n_steps} steps)")
             bump_version()
             save_state()
 
-        return {"status": "ok", "tasks_created": created_tasks}
+        return {"status": "ok", "executed": True}
 
     created_tasks = []
     # Map step index → task ID for dependency resolution

@@ -1067,10 +1067,11 @@ while True:
                 set_status(ctx, "idle")
                 continue
 
-        _TASK_MSG_TYPES = {"task", "qa_feedback", "review_feedback", "uat_feedback"}
+        _TASK_MSG_TYPES = {"task", "qa_feedback", "review_feedback", "uat_feedback", "execute"}
         is_task = any(m.get("msg_type") in _TASK_MSG_TYPES or
                      (m.get("msg_type") == "message" and len(m.get("content", "")) > 10) for m in msgs)
         _is_rework = any(m.get("msg_type") in ("qa_feedback", "review_feedback", "uat_feedback") for m in msgs)
+        _is_execute = any(m.get("msg_type") == "execute" for m in msgs)
         is_chat_only = all(m.get("msg_type") == "chat" for m in msgs if m.get("sender") == "user")
 
         # ── System "task unblocked" notifications → fetch real task from hub ──
@@ -1192,9 +1193,9 @@ while True:
                     log(ctx, f"📁 Task workspace: {ws_path}")
                 break
 
-        # Auto-create kanban task (skip for reviewer agents with a review subtask)
+        # Auto-create kanban task (skip for reviewer agents with a review subtask, and execute messages)
         _is_reviewer = ctx.AGENT_NAME.startswith("reviewer-")
-        if is_task and not ctx.current_task_id and not (_is_reviewer and ctx._review_parent_id):
+        if is_task and not ctx.current_task_id and not _is_execute and not (_is_reviewer and ctx._review_parent_id):
             desc = next((m["content"] for m in msgs if m.get("sender") in ("user", "system")
                          and m.get("msg_type") in ("task", "message")), "")
             if desc and len(desc) > 10:
@@ -1211,8 +1212,8 @@ while True:
                     log(ctx, f"📌 Task #{ctx.current_task_id} created in kanban")
 
         # Early self-execute detection (before branch/project setup)
-        _is_self_execute = False
-        if ctx.AGENT_NAME == "architect" and ctx.current_task_id:
+        _is_self_execute = _is_execute
+        if not _is_self_execute and ctx.AGENT_NAME == "architect" and ctx.current_task_id:
             try:
                 _se_task = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
                 _is_self_execute = bool(_se_task and isinstance(_se_task, dict) and _se_task.get("_self_execute"))
