@@ -13,6 +13,34 @@ INSTALL_DIR="${HOME}/.local/share/multiagent"
 BIN_DIR="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Clean install: kill processes, wipe install dir ──
+echo -e "${B}Cleaning previous installation...${NC}"
+
+# Kill all running multiagent processes
+pkill -f "agents\.worker" 2>/dev/null || true
+pkill -f "hub_server:app" 2>/dev/null || true
+pkill -f "uvicorn.*hub" 2>/dev/null || true
+pkill -f "start\.py.*multiagent" 2>/dev/null || true
+sleep 0.5
+# Force-kill stragglers
+pkill -9 -f "agents\.worker" 2>/dev/null || true
+pkill -9 -f "hub_server:app" 2>/dev/null || true
+pkill -9 -f "uvicorn.*hub" 2>/dev/null || true
+
+# Wipe install dir completely
+rm -rf "$INSTALL_DIR"
+
+# Wipe runtime data dirs (.multiagent in common locations)
+for pid_dir in "${HOME}/.multiagent" "${PWD}/.multiagent"; do
+  if [ -d "$pid_dir" ]; then
+    rm -f "$pid_dir/.hub.pid" "$pid_dir/.hub.port" "$pid_dir/.daemon.pid" "$pid_dir/.worker_pids" 2>/dev/null
+    rm -f "$pid_dir/hub_state.json" "$pid_dir/hub_state.json.bak."* 2>/dev/null
+    rm -rf "$pid_dir/cache" "$pid_dir/logs" "$pid_dir/sessions" "$pid_dir/memory" 2>/dev/null
+  fi
+done
+
+echo -e "${G}✓ Previous installation cleaned${NC}"
+
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
 # Copy files — detect source directory

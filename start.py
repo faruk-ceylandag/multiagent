@@ -459,13 +459,21 @@ def _get_all_child_pids(parent_pid):
 
 _cleanup_running = False
 _cleanup_lock = threading.Lock()
+_force_exit_count = 0
 def cleanup(sig=None, frame=None):
-    global _cleanup_running
+    global _cleanup_running, _force_exit_count
+    if _cleanup_running:
+        # Second Ctrl+C during shutdown → force-exit immediately
+        _force_exit_count += 1
+        if _force_exit_count >= 1:
+            print(f"\n{DIM}Force exit.{NC}")
+            os._exit(1)
+        return
     with _cleanup_lock:
         if _cleanup_running:
             return
         _cleanup_running = True
-    print(f"\n{DIM}Shutting down...{NC}")
+    print(f"\n{DIM}Shutting down (Ctrl+C again to force)...{NC}")
     # Signal hub to save state before terminating
     try:
         import urllib.request
@@ -495,8 +503,9 @@ def cleanup(sig=None, frame=None):
         try: hub_proc.terminate()
         except OSError: pass  # expected: process already exited
 
-    # Wait briefly for graceful shutdown
-    time.sleep(2)
+    # Wait briefly for graceful shutdown (use polling loop so signals aren't swallowed)
+    for _ in range(20):
+        time.sleep(0.1)
 
     # Phase 2: SIGKILL anything still alive (workers, claude CLIs, MCP servers)
     for name, w in workers.items():
@@ -556,7 +565,8 @@ hub_env["MA_DIR"] = MA_DIR; hub_env["WORKSPACE"] = WORKSPACE
 hub_proc = subprocess.Popen(
     [sys.executable, "-m", "uvicorn", "hub.hub_server:app",
      "--host", "127.0.0.1", "--port", str(HUB_PORT), "--log-level", "info"],
-    cwd=MA_DIR, stdout=hub_log, stderr=hub_log, env=hub_env)
+    cwd=MA_DIR, stdout=hub_log, stderr=hub_log, env=hub_env,
+    start_new_session=True)
 
 for i in range(30):
     time.sleep(0.5)

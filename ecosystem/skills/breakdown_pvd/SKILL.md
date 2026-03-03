@@ -104,6 +104,8 @@ If the metadata calls fail, use hardcoded fallback options:
 
 Read through the document content carefully. For each distinct feature, requirement, or component:
 
+> **Target size: XS or S.** A single task sized M or larger is **NOT allowed**. Always split into multiple smaller, independently deliverable tasks.
+
 **Dev task (Improvement):**
 - **Summary**: concise feature title
 - **Objective**: what this achieves and why
@@ -119,15 +121,28 @@ Read through the document content carefully. For each distinct feature, requirem
 - **Regression Areas**: features that could be affected
 - **Edge Cases**: boundary conditions, error states
 
-**T-shirt sizing for each task:**
+**T-shirt sizing reference:**
 
 | Size | Sprints | When to use |
 |------|---------|-------------|
 | XS | 2 | Config change, copy update, minor UI tweak |
 | S | 4 | Single-component, straightforward API |
-| M | 6 | Multi-component, moderate backend + frontend |
-| L | 8 | Cross-cutting, multiple services, schema changes |
-| XL | 10 | Major architecture, new system, migration |
+| M | 6 | **MUST split** → at least 2 S/XS tasks (more if complexity warrants) |
+| L | 8 | **MUST split** → at least 3 S/XS tasks (scale with scope) |
+| XL | 10 | **MUST split** → at least 4 S/XS tasks (as many as needed) |
+
+**Mandatory split rule:** If your initial analysis produces a task sized M or larger, you MUST split it before proceeding. Every final task must be XS or S. The number of resulting tasks is **dynamic** — split as many times as needed until each piece is independently deliverable at XS/S size. Do not artificially limit or pad the count; let the document's complexity drive it. Apply these split strategies:
+
+1. **Layer split**: Backend API → Frontend UI → Data migration (each as separate task)
+2. **Sub-feature split**: Each independently usable feature becomes its own task
+3. **Workflow step split**: Schema/model → CRUD/service → UI/component → Validation/edge-cases
+4. **Component split**: Each distinct UI component or service module as a separate task
+
+**Split rules:**
+- Each split task must be independently deliverable and testable
+- QA tasks follow a 1:1 mapping — one QA task per dev task after splitting
+- Prefer more small tasks over fewer large tasks; aim for XS when possible
+- Maintain dependency order between split tasks using `depends_on_step`
 
 ### Step 6: Build plan_proposal with form_fields
 
@@ -149,6 +164,11 @@ Use mcp__atlassian__createJiraIssue:
 After creation, call mcp__atlassian__editJiraIssue to set:
 - customfield_15159 (Subteam): {{subteam}} (if not empty)
 - customfield_20510 (Design Review Required): true (if Figma link exists)
+
+After ALL post-creation edits are done, report the created issue to the user by sending:
+  curl -s -X POST $HUB/messages -H 'Content-Type: application/json' \
+    -d '{"sender":"$AGENT_NAME","receiver":"user","content":"Created: **<ISSUE_KEY>** — <summary>\nhttps://winsider.atlassian.net/browse/<ISSUE_KEY>","msg_type":"info"}'
+(Replace <ISSUE_KEY> with the key returned by createJiraIssue, <summary> with the issue summary)
 
 ---
 Description for the Jira issue:
@@ -187,6 +207,11 @@ Use mcp__atlassian__createJiraIssue:
 After creation:
 - Set customfield_15159 (Subteam): {{subteam}} (if not empty) via mcp__atlassian__editJiraIssue
 - Link to dev task via mcp__atlassian__jiraWrite with method createIssueLink (type: "Relates", inwardIssue: this QA issue, outwardIssue: dev issue from previous step)
+
+After ALL post-creation edits and linking are done, report the created issue to the user by sending:
+  curl -s -X POST $HUB/messages -H 'Content-Type: application/json' \
+    -d '{"sender":"$AGENT_NAME","receiver":"user","content":"Created QA: **<ISSUE_KEY>** — <summary>\nhttps://winsider.atlassian.net/browse/<ISSUE_KEY>","msg_type":"info"}'
+(Replace <ISSUE_KEY> with the key returned by createJiraIssue, <summary> with the issue summary)
 
 ---
 Description for the Jira issue:
