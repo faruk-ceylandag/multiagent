@@ -53,6 +53,9 @@ def git(ctx, args, cwd=None):
         r = subprocess.run(["git"] + args, cwd=cwd or ctx.WORKSPACE,
                            capture_output=True, text=True, timeout=15)
         return r.returncode == 0, r.stdout.strip()
+    except subprocess.TimeoutExpired:
+        log(ctx, f"⚠ git {' '.join(args[:3])} timed out (15s)")
+        return False, "timeout"
     except Exception:
         return False, ""
 
@@ -169,8 +172,12 @@ def git_branch(ctx, project, branch_name=None):
     if clean.startswith("feature/feature/"):
         clean = clean[len("feature/"):]
     branch = clean if clean.startswith("feature/") else f"feature/{clean}"
-    branch = branch.rstrip('/-')
+    branch = branch.rstrip('/-.')
     branch = branch[:80]
+    # Truncation may leave trailing - or . — strip again, ensure minimum length
+    branch = branch.rstrip('-.')
+    if len(branch) < len("feature/") + 3:
+        branch = f"feature/task-{int(time.time()) % 100000}"
 
     # Already on the target branch — do nothing
     ok, cur = git(ctx, ["branch", "--show-current"], d)
@@ -208,11 +215,15 @@ def git_branch(ctx, project, branch_name=None):
         if not pop_ok and pop_out:
             pop_lower = pop_out.lower()
             if "conflict" in pop_lower:
-                # Conflict — recover to clean state by accepting all incoming changes
+                # Conflict — resolve by accepting all incoming (stashed) changes
+                # checkout --theirs only works for files with both versions;
+                # git add . marks ALL conflicts as resolved regardless
                 log(ctx, f"⚠ Stash pop conflict — auto-resolving with incoming changes")
                 git(ctx, ["checkout", "--theirs", "."], d)
                 git(ctx, ["add", "."], d)
                 git(ctx, ["reset", "HEAD"], d)
+                # stash pop with conflicts doesn't remove the stash entry — drop it
+                git(ctx, ["stash", "drop"], d)
             elif "no stash" in pop_lower:
                 pass  # Nothing to pop, fine
             # else: git stash pop succeeded but returned non-zero (normal — shows status)
@@ -385,5 +396,7 @@ def create_github_pr(ctx, project, branch, title):
             hub_msg(ctx, "user", f"📋 PR created: {pr_url}", "info")
         else:
             log(ctx, f"⚠ PR failed: {r.stderr[:80]}")
+    except subprocess.TimeoutExpired:
+        log(ctx, f"⚠ gh pr create timed out (30s)")
     except Exception as e:
         log(ctx, f"PR error: {e}")

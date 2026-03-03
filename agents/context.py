@@ -94,6 +94,7 @@ class AgentContext:
 
         # ── Active patterns for this task (for post-task voting) ──
         self._active_pattern_ids = []
+        self._active_pattern_texts = {}  # pattern_id → pattern text (for targeted failure voting)
 
         # ── Regex ──
         self._UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
@@ -110,12 +111,22 @@ class AgentContext:
 
     def get_task_session(self, task_id):
         """Get stored CLI session ID for a task (None if not yet established).
-        Only returns sessions that were actually created by the CLI."""
-        return self._session_map.get(task_id)
+        Only returns sessions that were actually created by the CLI.
+        Moves accessed entry to end for LRU eviction."""
+        sid = self._session_map.get(task_id)
+        if sid is not None:
+            # Move to end (most recently used) for LRU ordering
+            self._session_map[task_id] = self._session_map.pop(task_id)
+        return sid
 
     def set_task_session(self, task_id, session_id):
-        """Store the actual CLI session ID for a task after successful call."""
-        if len(self._session_map) >= self._SESSION_MAP_MAX:
+        """Store the actual CLI session ID for a task after successful call.
+        Evicts least recently used entry when at capacity."""
+        if task_id in self._session_map:
+            # Update existing — move to end
+            del self._session_map[task_id]
+        elif len(self._session_map) >= self._SESSION_MAP_MAX:
+            # Evict LRU (first entry in ordered dict)
             oldest = next(iter(self._session_map))
             del self._session_map[oldest]
         self._session_map[task_id] = session_id

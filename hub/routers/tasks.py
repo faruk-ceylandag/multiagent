@@ -13,6 +13,7 @@ from hub.state import (
 )
 
 MAX_REWORK_ITERATIONS = MAX_QA_REWORK_LOOPS  # Alias for backward compat
+MAX_TOTAL_REWORK_CYCLES = 5  # Combined cap across code_review + QA + UAT rework cycles
 _QA_AGENT_HINTS = {"qa", "test", "tester", "quality"}
 
 router = APIRouter(tags=["tasks"])
@@ -104,7 +105,7 @@ def create_task(data: dict):
         from hub.state import add_audit
         add_audit(task["created_by"], "task_create", {"task_id": tid, "description": task["description"][:100]})
         add_activity(task["created_by"], task["assigned_to"] or "?", "task_create", task["description"][:100])
-        save_state()
+        save_state(force=True)  # H2: Force save on task creation to prevent data loss
     return {"status": "ok", "id": tid}
 
 @router.post("/tasks/{tid}")
@@ -119,8 +120,8 @@ def update_task(tid: int, data: dict):
         old_status = tasks[tid].get("status", "")
         new_status = data.get("status", old_status)
         if new_status != old_status and new_status in TASK_STATES:
-            allowed = VALID_TRANSITIONS.get(old_status, set())
-            if allowed and new_status not in allowed:
+            allowed = VALID_TRANSITIONS.get(old_status)
+            if allowed is not None and new_status not in allowed:
                 return {"status": "error", "message": f"Invalid transition: {old_status} \u2192 {new_status}"}
         # Validate dependencies BEFORE applying any changes
         new_deps = data.get("depends_on")
@@ -333,7 +334,9 @@ def update_task(tid: int, data: dict):
         if new_status == "uat" and old_status != "uat":
             tasks[tid]["_uat_entered_at"] = datetime.now().isoformat()
 
-        save_state()
+        # H2: Force save on terminal status changes to prevent data loss on crash
+        _is_terminal = new_status in ("done", "failed", "cancelled") and old_status != new_status
+        save_state(force=_is_terminal)
     return {"status": "ok"}
 
 def _auto_notify_dependents(completed_tid):
@@ -437,17 +440,22 @@ def _dispatch_code_review(tid):
         bump_version()
         return
 
-    # Track rework loop count
+    # Track rework loop count (per-phase and total)
     rework_count = task.get("_review_cycle", 0)
-    if rework_count >= MAX_REWORK_LOOPS:
-        # Auto-approve after max rework cycles
+    total_rework = task.get("_total_rework_cycles", 0)
+    if rework_count >= MAX_REWORK_LOOPS or total_rework >= MAX_TOTAL_REWORK_CYCLES:
+        # Auto-approve after max rework cycles (per-phase or total cap)
+        reason = (f"total {total_rework}/{MAX_TOTAL_REWORK_CYCLES} rework cycles"
+                  if total_rework >= MAX_TOTAL_REWORK_CYCLES
+                  else f"max {MAX_REWORK_LOOPS} review rework cycles")
         task["status"] = "in_testing"
         task["_testing_started_at"] = datetime.now().isoformat()
         task_reviews[tid_str] = {r: {"verdict": "approve", "comments": [],
                                       "timestamp": datetime.now().isoformat(), "auto": True}
                                   for r in reviewers}
         add_activity("system", task.get("assigned_to", "?"), "review_auto_approved",
-                     f"Code review #{tid} auto-approved (max {MAX_REWORK_LOOPS} rework cycles)")
+                     f"Code review #{tid} auto-approved ({reason})")
+        logger.info(f"Auto-approved review #{tid}: {reason}")
         _dispatch_qa(tid)
         bump_version()
         return
@@ -551,7 +559,22 @@ def _dispatch_qa(tid):
     task = tasks.get(tid, {})
     if not task:
         return
-    qa_agent = next((a for a in ALL_AGENTS if _is_qa_agent(a) and a not in HIDDEN_AGENTS), None)
+    # Find a QA agent that is both configured AND registered (online/idle)
+    qa_agent = None
+    for a in ALL_AGENTS:
+        if _is_qa_agent(a) and a not in HIDDEN_AGENTS:
+            agent_info = agents.get(a, {})
+            agent_status = agent_info.get("status", "")
+            if agent_info and agent_status not in ("offline", ""):
+                qa_agent = a
+                break
+    if not qa_agent:
+        # Check if there's a configured QA agent that just isn't registered yet
+        configured_qa = next((a for a in ALL_AGENTS if _is_qa_agent(a) and a not in HIDDEN_AGENTS), None)
+        if configured_qa:
+            logger.warning(f"QA agent '{configured_qa}' is configured but not registered/online — skipping QA for task #{tid}")
+        else:
+            logger.warning(f"No QA agent configured — skipping QA for task #{tid}")
     if not qa_agent:
         # No QA agent → skip to UAT (or done if auto_uat)
         if _cfg.get("auto_uat", False):
@@ -665,13 +688,17 @@ def _handle_qa_failure(tid, old_status, detail=""):
         return False
 
     qa_cycle = task.get("_qa_cycle", 0) + 1
+    total_rework = task.get("_total_rework_cycles", 0) + 1
 
-    if qa_cycle >= MAX_REWORK_ITERATIONS:
-        # Max QA cycles reached — let task stay failed
+    if qa_cycle >= MAX_REWORK_ITERATIONS or total_rework >= MAX_TOTAL_REWORK_CYCLES:
+        # Max QA or total rework cycles reached — let task stay failed
+        reason = (f"total rework cap ({total_rework}/{MAX_TOTAL_REWORK_CYCLES})"
+                  if total_rework >= MAX_TOTAL_REWORK_CYCLES
+                  else f"QA cycles ({MAX_REWORK_ITERATIONS})")
         ts = datetime.now().isoformat()
         messages.setdefault("user", []).append({
             "sender": "system", "receiver": "user",
-            "content": f"🔄 Max QA cycles ({MAX_REWORK_ITERATIONS}) reached for task #{tid}. "
+            "content": f"🔄 Max {reason} reached for task #{tid}. "
                        f"Marked as failed — manual intervention needed.",
             "msg_type": "blocker", "timestamp": ts,
         })
@@ -687,6 +714,7 @@ def _handle_qa_failure(tid, old_status, detail=""):
     # Redirect: set task back to in_progress (same task, new cycle)
     task["status"] = "in_progress"
     task["_qa_cycle"] = qa_cycle
+    task["_total_rework_cycles"] = total_rework
     task["_review_cycle"] = 0  # Reset so code review runs fresh
     task.pop("completed_at", None)  # Not completed yet
     qa_feedback = detail or task.pop("error_message", None) or "QA tests failed — see QA agent logs for details"
@@ -816,6 +844,7 @@ OUTPUT FORMAT — Generate a Jira-compatible comment:
 After generating the report, send it to user with: curl -s -X POST $HUB/messages -H 'Content-Type: application/json' -d '{{"sender":"{agent}","receiver":"user","content":"REPORT_HERE","msg_type":"check_report"}}'"""
 
     with lock:
+        tasks[tid]["_is_check_task"] = True
         ts = datetime.now().isoformat()
         messages.setdefault(agent, []).append({
             "sender": "user", "receiver": agent,
@@ -1353,6 +1382,7 @@ def submit_review(tid: int, data: dict):
                 tasks[tid]["status"] = "in_progress"
                 tasks[tid].pop("review_dispatched_at", None)
                 tasks[tid]["_review_cycle"] = tasks[tid].get("_review_cycle", 0) + 1
+                tasks[tid]["_total_rework_cycles"] = tasks[tid].get("_total_rework_cycles", 0) + 1
                 dev_agent = tasks[tid].get("assigned_to", "")
                 # Collect all change requests
                 all_issues = []
@@ -1420,6 +1450,7 @@ def uat_decision(tid: int, data: dict):
         else:
             task["status"] = "in_progress"
             task["_review_cycle"] = 0  # Reset review cycle on UAT reject
+            task["_total_rework_cycles"] = task.get("_total_rework_cycles", 0) + 1
             dev_agent = task.get("assigned_to", "")
             if dev_agent:
                 messages.setdefault(dev_agent, []).append({
@@ -1465,6 +1496,9 @@ def approve_plan(data: dict):
     if not selected:
         return {"status": "error", "message": "no steps selected"}
 
+    # Form values for {{placeholder}} substitution in step descriptions
+    form_values = data.get("form_values", {})
+
     created_tasks = []
     # Map step index → task ID for dependency resolution
     step_to_tid = {}
@@ -1477,6 +1511,18 @@ def approve_plan(data: dict):
             if idx < 0 or idx >= len(steps):
                 continue
             step = steps[idx]
+            # Validate that the target agent exists
+            step_agent = step.get("assigned_to", "")
+            if step_agent and step_agent not in ALL_AGENTS:
+                logger.warning(f"Plan #{plan_id} step {idx}: agent '{step_agent}' does not exist — skipping step")
+                ts_skip = datetime.now().isoformat()
+                messages.setdefault("user", []).append({
+                    "sender": "system", "receiver": "user",
+                    "content": f"Plan #{plan_id} step {idx} skipped: agent '{step_agent}' does not exist. "
+                               f"Description: {step.get('description', '')[:100]}",
+                    "msg_type": "warning", "timestamp": ts_skip,
+                })
+                continue
             # Resolve depends_on_step → real task IDs (skip if dep was not selected)
             deps = []
             dep_step = step.get("depends_on_step")
@@ -1504,9 +1550,14 @@ def approve_plan(data: dict):
                 else:
                     plan_shared_branch = ""
                     plan_shared_ext_id = ""
+            # Apply {{placeholder}} substitution from form_values
+            step_desc = step.get("description", "")
+            for fk, fv in form_values.items():
+                step_desc = step_desc.replace("{{" + fk + "}}", str(fv))
+
             task = {
                 "id": tid,
-                "description": step.get("description", ""),
+                "description": step_desc,
                 "assigned_to": step.get("assigned_to", ""),
                 "status": "to_do",
                 "depends_on": deps,

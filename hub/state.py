@@ -57,6 +57,9 @@ MAX_COMMENTS_PER_TASK = 100
 MAX_PENDING_PLANS = 200
 MAX_CACHE_ENTRIES = 500
 MAX_LEARNINGS = 500
+MAX_MSG_PER_AGENT = 500  # H6: Per-agent message queue cap
+DEFAULT_UAT_TIMEOUT = 1800  # H9: 30 min default UAT timeout
+DEFAULT_TASK_TIMEOUT = 3600  # W3: 60 min default in_progress timeout
 BUDGET_LIMIT = float(_cfg.get("budget_limit", 0))
 BUDGET_PER_AGENT = float(_cfg.get("budget_per_agent", 0))
 
@@ -427,12 +430,13 @@ STATE_FILE = os.path.join(MA_DIR, "hub_state.json") if MA_DIR else ""
 _save_pending = False
 _last_save = 0
 
-def save_state():
+def save_state(force=False):
+    """Save state. force=True bypasses batching (for task create/complete)."""
     global _save_pending, _last_save
     bump_version()
     if not STATE_FILE:
         return
-    if time.time() - _last_save < 5:
+    if not force and time.time() - _last_save < 5:
         _save_pending = True
         return
     _do_save()
@@ -467,6 +471,8 @@ def _do_save():
     _save_pending = False
     _last_save = time.time()
     try:
+        # H6: Enforce message queue limits before save
+        trim_message_queues()
         # Task cleanup under lock (rare path — only when > MAX_TASKS)
         task_snapshot = dict(tasks)
         if len(task_snapshot) > MAX_TASKS:
@@ -783,6 +789,12 @@ def add_audit(actor: str, action: str, details: dict = None):
         "action": action,
         "details": details or {},
     })
+
+def trim_message_queues():
+    """H6: Enforce per-agent message queue size limits."""
+    for agent_name, msgs in messages.items():
+        if len(msgs) > MAX_MSG_PER_AGENT:
+            del msgs[:len(msgs) - MAX_MSG_PER_AGENT]
 
 def rate_ok(sender):
     now = datetime.now()
@@ -1175,7 +1187,7 @@ def _review_timeout_timer():
                     except (ValueError, TypeError):
                         pass
                 elif task.get("status") == "uat":
-                    uat_timeout = _cfg.get("auto_uat_timeout", 0)
+                    uat_timeout = _cfg.get("auto_uat_timeout", DEFAULT_UAT_TIMEOUT)
                     if uat_timeout > 0:
                         entered = task.get("_uat_entered_at", "")
                         if not entered:
@@ -1204,6 +1216,41 @@ def _review_timeout_timer():
                                 bump_version()
                         except (ValueError, TypeError):
                             pass
+                # W3: Task-level timeout — fail tasks stuck in_progress too long
+                elif task.get("status") == "in_progress":
+                    task_timeout = _cfg.get("task_timeout", DEFAULT_TASK_TIMEOUT)
+                    if task_timeout > 0:
+                        started = task.get("started_at", "")
+                        if started:
+                            try:
+                                started_time = datetime.fromisoformat(started)
+                                elapsed = (now - started_time).total_seconds()
+                                if elapsed > task_timeout:
+                                    agent_name = task.get("assigned_to", "?")
+                                    # Check if agent is still alive (last_seen within 5 min)
+                                    agent_info = agents.get(agent_name, {})
+                                    last_seen = agent_info.get("last_seen", "")
+                                    agent_alive = False
+                                    if last_seen:
+                                        try:
+                                            ls_time = datetime.fromisoformat(last_seen)
+                                            agent_alive = (now - ls_time).total_seconds() < 300
+                                        except (ValueError, TypeError):
+                                            pass
+                                    if not agent_alive:
+                                        task["status"] = "failed"
+                                        task["completed_at"] = now.isoformat()
+                                        task["error_message"] = f"Task timeout ({task_timeout}s) — agent {agent_name} unresponsive"
+                                        messages.setdefault("user", []).append({
+                                            "sender": "system", "receiver": "user",
+                                            "content": f"⏰ Task #{tid} timed out ({int(elapsed)}s, agent {agent_name} unresponsive). Marked as failed.",
+                                            "msg_type": "warning", "timestamp": now.isoformat(),
+                                        })
+                                        add_activity("system", agent_name, "task_timeout",
+                                                     f"Task #{tid} timed out ({int(elapsed)}s)")
+                                        bump_version()
+                            except (ValueError, TypeError):
+                                pass
                 # Legacy peer review timeout
                 elif task.get("review_status") == "pending_review":
                     completed_at = task.get("completed_at", "")
@@ -1248,6 +1295,7 @@ def _lock_cleanup_timer():
             break
         now = datetime.now()
         with lock:
+            # Clean stale file locks
             for path in list(file_locks.keys()):
                 agent_name = file_locks[path].get("agent", "")
                 a = agents.get(agent_name, {})
@@ -1258,6 +1306,13 @@ def _lock_cleanup_timer():
                         add_activity("system", agent_name, "lock_cleanup", f"Stale lock removed: {path}")
                 except (ValueError, TypeError):
                     del file_locks[path]
+            # M5.2: Clean stale SSE client entries (count <= 0)
+            stale_sse = [k for k, v in sse_clients.items() if v <= 0]
+            for k in stale_sse:
+                del sse_clients[k]
+            # M5.4: Enforce analytics log cap
+            if len(analytics_log) > MAX_ANALYTICS:
+                del analytics_log[:len(analytics_log) - MAX_ANALYTICS]
 
 def shutdown_save():
     """Final state save during shutdown."""

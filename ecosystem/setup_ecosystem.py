@@ -339,7 +339,7 @@ def get_smart_hints(task_content, project_name=None, ma_dir="", hub_url="", role
 
     if any(k in low for k in ["playwright", "e2e test", "e2e ", "browser test",
                                "end-to-end", "end to end"]):
-        hints.append("TIP: Use @playwright-generator subagent or /playwright-test command for E2E tests.")
+        hints.append("TIP: Use @playwright-generator subagent or /playwright_test skill for E2E tests.")
 
     if any(k in low for k in ["test fail", "flaky test", "broken test", "test broke",
                                "fix test", "heal test", "test timeout"]):
@@ -347,15 +347,31 @@ def get_smart_hints(task_content, project_name=None, ma_dir="", hub_url="", role
 
     if any(k in low for k in ["figma to vue", "convert figma", "figma component",
                                "figma vue", "design to code", "design to vue"]):
-        hints.append("TIP: Use @figma-to-vue subagent or /figma-to-vue command for Figma→Vue conversion.")
+        hints.append("TIP: Use @figma-to-vue subagent or /figma_to_vue skill for Figma→Vue conversion.")
 
     if any(k in low for k in ["migrate test", "selenium to playwright", "convert test",
                                "test migration", "cypress to playwright"]):
-        hints.append("TIP: Use @test-migrator subagent or /migrate-test command for test framework migration.")
+        hints.append("TIP: Use @test-migrator subagent or /test_migration skill for test framework migration.")
 
     if any(k in low for k in ["new route", "vue router", "add route", "generate route",
                                "route definition"]):
         hints.append("TIP: Use @route-generator subagent or /generate-route command for Vue Router routes.")
+
+    if any(k in low for k in ["deploy", "deployment", "release", "staging", "production",
+                               "ship", "go live"]):
+        hints.append("TIP: Use /deploy skill to build, verify, and deploy the current project.")
+
+    if any(k in low for k in ["health", "system status", "agent status", "budget",
+                               "check system", "diagnostics"]):
+        hints.append("TIP: Use /health_check skill to check system health, agent statuses, and budgets.")
+
+    if any(k in low for k in ["jira", "ticket", "issue key", "atlassian",
+                               "impact analysis", "dev check"]):
+        hints.append("TIP: Use /jira_dev_check skill for dev impact analysis or /jira_qa_check skill for QA analysis on Jira tickets.")
+
+    if any(k in low for k in ["pvd", "tech design", "tech-design", "product vision",
+                               "breakdown", "decompose", "break down", "work items"]):
+        hints.append("TIP: Use /breakdown_pvd skill to break down a PVD/tech-design into Jira tasks.")
 
     # ── Build output: rules first, then hints ──
     parts = []

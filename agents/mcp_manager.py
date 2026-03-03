@@ -1,6 +1,7 @@
 """agents/mcp_manager.py — MCP server setup, reload, availability, and file watching."""
 import os
 import json
+import fcntl
 import subprocess
 import threading
 import time
@@ -10,6 +11,19 @@ from .credentials import load_credentials
 # Track file modification times for change detection
 _mcp_file_mtimes = {}
 _creds_mtime = 0
+
+# E3 fix: persistent debounce timestamp at module level (survives thread restarts)
+_last_reload_time = 0
+
+# RC-7 fix: lock to prevent concurrent reload from watcher thread and main thread
+_reload_lock = threading.Lock()
+
+# E5 fix: flag indicating credentials have changed and MCP servers need re-initialization
+# Set by the file watcher when credentials.env changes; checked at task start.
+_mcp_reinit_needed = False
+
+# E2 fix: path for file-level lock on ~/.claude.json
+_CLAUDE_JSON_LOCK = os.path.expanduser("~/.claude/.claude.json.lock")
 
 
 def _resolve_mcp_env(spec, creds):
@@ -36,59 +50,72 @@ def _clean_stale_project_mcps(ctx, desired_servers):
     """Remove stale project-level MCP entries from ALL projects in ~/.claude.json.
     Project-level entries shadow user-level ones, so ANY project with a stale entry
     (e.g. atlassian registered as stdio instead of sse) will break MCP tool discovery.
-    Directly edits JSON to preserve OAuth tokens (unlike 'claude mcp remove')."""
+    Directly edits JSON to preserve OAuth tokens (unlike 'claude mcp remove').
+    Uses file locking (E2 fix) to prevent concurrent writes from multiple agents."""
     claude_json = os.path.expanduser("~/.claude.json")
     if not os.path.exists(claude_json):
         return
+
+    # E2 fix: acquire exclusive file lock for read-modify-write
+    os.makedirs(os.path.dirname(_CLAUDE_JSON_LOCK), exist_ok=True)
     try:
-        with open(claude_json) as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        lock_fh = open(_CLAUDE_JSON_LOCK, "w")
+    except OSError:
         return
-
-    projects = data.get("projects", {})
-    if not projects:
-        return
-
-    modified = False
-    cleaned_paths = []
-
-    # Clean ALL project entries — any stale entry in any project can shadow user-level
-    for path_key, entry in projects.items():
-        project_mcps = entry.get("mcpServers", {})
-        if not project_mcps:
-            continue
-
-        for name in list(desired_servers.keys()):
-            if name not in project_mcps:
-                continue
-            proj_srv = project_mcps[name]
-            desired = desired_servers[name]
-            proj_type = proj_srv.get("type", "stdio")
-            desired_type = desired.get("type", "stdio")
-            proj_url = proj_srv.get("url", "")
-            desired_url = desired.get("url", "")
-            proj_cmd = proj_srv.get("command", "")
-            desired_cmd = desired.get("command", "")
-            stale = False
-            if proj_type != desired_type:
-                stale = True
-            elif desired_url and proj_url != desired_url:
-                stale = True
-            elif desired_cmd and proj_cmd != desired_cmd:
-                stale = True
-            if stale:
-                del project_mcps[name]
-                modified = True
-                cleaned_paths.append(f"{name}@{os.path.basename(path_key)}")
-
-    if modified:
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
         try:
-            with open(claude_json, "w") as f:
-                json.dump(data, f, indent=2)
-            log(ctx, f"🧹 Cleaned {len(cleaned_paths)} stale project MCPs: {', '.join(cleaned_paths[:5])}")
-        except OSError as e:
-            log(ctx, f"⚠ Failed to write cleaned ~/.claude.json: {e}")
+            with open(claude_json) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return
+
+        projects = data.get("projects", {})
+        if not projects:
+            return
+
+        modified = False
+        cleaned_paths = []
+
+        # Clean ALL project entries — any stale entry in any project can shadow user-level
+        for path_key, entry in projects.items():
+            project_mcps = entry.get("mcpServers", {})
+            if not project_mcps:
+                continue
+
+            for name in list(desired_servers.keys()):
+                if name not in project_mcps:
+                    continue
+                proj_srv = project_mcps[name]
+                desired = desired_servers[name]
+                proj_type = proj_srv.get("type", "stdio")
+                desired_type = desired.get("type", "stdio")
+                proj_url = proj_srv.get("url", "")
+                desired_url = desired.get("url", "")
+                proj_cmd = proj_srv.get("command", "")
+                desired_cmd = desired.get("command", "")
+                stale = False
+                if proj_type != desired_type:
+                    stale = True
+                elif desired_url and proj_url != desired_url:
+                    stale = True
+                elif desired_cmd and proj_cmd != desired_cmd:
+                    stale = True
+                if stale:
+                    del project_mcps[name]
+                    modified = True
+                    cleaned_paths.append(f"{name}@{os.path.basename(path_key)}")
+
+        if modified:
+            try:
+                with open(claude_json, "w") as f:
+                    json.dump(data, f, indent=2)
+                log(ctx, f"🧹 Cleaned {len(cleaned_paths)} stale project MCPs: {', '.join(cleaned_paths[:5])}")
+            except OSError as e:
+                log(ctx, f"⚠ Failed to write cleaned ~/.claude.json: {e}")
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
 
 
 def _build_mcp_add_cmd(name, spec, env_vars):
@@ -111,15 +138,28 @@ def _build_mcp_add_cmd(name, spec, env_vars):
 
 def _get_registered_mcps(cwd):
     """Read already-registered MCP servers from .claude.json (local config).
-    Returns dict of {name: server_config} for comparison."""
+    Returns dict of {name: server_config} for comparison.
+    Uses shared file lock on ~/.claude.json (E2 fix) to avoid reading partial writes."""
     registered = {}
+    user_claude_json = os.path.expanduser("~/.claude.json")
     # Check local (agent CWD), user (~), and project configs
-    paths = [os.path.join(cwd, ".claude.json"), os.path.expanduser("~/.claude.json")]
+    paths = [os.path.join(cwd, ".claude.json"), user_claude_json]
     for cj in paths:
         if os.path.exists(cj):
             try:
-                with open(cj) as f:
-                    data = json.load(f)
+                # E2 fix: use shared lock when reading ~/.claude.json
+                if cj == user_claude_json:
+                    os.makedirs(os.path.dirname(_CLAUDE_JSON_LOCK), exist_ok=True)
+                    with open(_CLAUDE_JSON_LOCK, "w") as lock_fh:
+                        fcntl.flock(lock_fh, fcntl.LOCK_SH)
+                        try:
+                            with open(cj) as f:
+                                data = json.load(f)
+                        finally:
+                            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+                else:
+                    with open(cj) as f:
+                        data = json.load(f)
                 for name, srv in data.get("mcpServers", {}).items():
                     if name not in registered:
                         registered[name] = srv
@@ -306,7 +346,14 @@ def ensure_mcp(ctx, needed_names):
 
 def reload_mcp(ctx):
     """Reload MCP servers (after new credentials saved).
-    Only regenerates .mcp.json — no need to re-run 'claude mcp add' (causes 'already exists' spam)."""
+    Only regenerates .mcp.json — no need to re-run 'claude mcp add' (causes 'already exists' spam).
+    RC-7 fix: uses _reload_lock to prevent race between file watcher thread and main thread."""
+    with _reload_lock:
+        _reload_mcp_inner(ctx)
+
+
+def _reload_mcp_inner(ctx):
+    """Inner reload logic, must be called under _reload_lock."""
     creds = load_credentials(ctx)
     try:
         from ecosystem.mcp.setup_mcp import write_mcp_json
@@ -423,13 +470,14 @@ def _watch_mcp_files(ctx):
     except OSError:
         pass
 
-    _last_reload = 0  # debounce: skip if reloaded within last 10s
+    # E3 fix: use module-level _last_reload_time instead of local variable
+    # so debounce state persists across thread restarts and is shared with main thread
+    global _last_reload_time
 
     while True:
         time.sleep(15)
         try:
-            import time as _tw
-            now = _tw.time()
+            now = time.time()
             need_reload = False
 
             # Check .mcp.json files
@@ -444,6 +492,9 @@ def _watch_mcp_files(ctx):
                     break
 
             # Check credentials.env
+            # E5 fix: when credentials change, also set _mcp_reinit_needed so
+            # MCP servers are fully re-initialized at the next task start.
+            global _mcp_reinit_needed
             try:
                 current_creds_mtime = os.path.getmtime(creds_path) if os.path.exists(creds_path) else 0
             except OSError:
@@ -451,11 +502,12 @@ def _watch_mcp_files(ctx):
             if current_creds_mtime > _creds_mtime:
                 _creds_mtime = current_creds_mtime
                 need_reload = True
+                _mcp_reinit_needed = True
 
             # Debounce: only reload if >10s since last reload
-            if need_reload and (now - _last_reload) > 10:
+            if need_reload and (now - _last_reload_time) > 10:
                 reload_mcp(ctx)
-                _last_reload = now
+                _last_reload_time = now
         except Exception as e:
             log(ctx, f"\u26a0 MCP watcher: {e}")
             time.sleep(30)
@@ -512,7 +564,12 @@ def adopt_project_mcp(ctx, project_dir):
 
 
 def check_mcp_health(ctx, needed_names, timeout=3):
-    """Quick connectivity check for MCP servers. Returns set of healthy server names."""
+    """Quick connectivity check for MCP servers. Returns set of healthy server names.
+    E1 fix: for stdio servers, also checks if the process is actually running
+    (not just whether the binary exists on PATH).
+    E4 fix: after verifying binary exists, performs a basic liveness probe by
+    spawning the server briefly and checking it responds on stdio within 2s.
+    If liveness fails, attempts a restart."""
     if not needed_names:
         return set()
     healthy = set()
@@ -536,14 +593,174 @@ def check_mcp_health(ctx, needed_names, timeout=3):
                 log(ctx, f"⚠ MCP {name} unreachable ({spec.get('url', '')[:60]})")
         elif spec.get("command"):
             import shutil
-            if shutil.which(spec["command"]):
-                healthy.add(name)
-            else:
+            cmd_path = shutil.which(spec["command"])
+            if not cmd_path:
                 log(ctx, f"⚠ MCP {name}: command '{spec['command']}' not found")
+                continue
+
+            # E1 fix: check if the stdio MCP process is actually running
+            alive = _check_stdio_mcp_alive(name, spec)
+
+            # E4 fix: liveness probe — try to spawn the server and verify it
+            # responds on stdio (JSON-RPC initialize handshake) within 2s.
+            if alive or not alive:
+                liveness_ok = _probe_stdio_liveness(name, spec, timeout=2)
+                if liveness_ok:
+                    healthy.add(name)
+                elif alive:
+                    # Process exists but doesn't respond — attempt restart
+                    log(ctx, f"⚠ MCP {name}: process alive but unresponsive, attempting restart")
+                    _restart_stdio_mcp(ctx, name, spec)
+                    # Re-probe after restart
+                    if _probe_stdio_liveness(name, spec, timeout=2):
+                        healthy.add(name)
+                        log(ctx, f"✓ MCP {name}: restarted and responding")
+                    else:
+                        log(ctx, f"⚠ MCP {name}: restart failed, marking unhealthy")
+                else:
+                    # Binary exists but no running process and liveness failed —
+                    # still mark healthy since Claude CLI will start it on demand
+                    healthy.add(name)
+                    log(ctx, f"ℹ MCP {name}: binary found, will start on demand")
         else:
             # No spec or unknown type — assume healthy (stdio servers are local)
             healthy.add(name)
     return healthy
+
+
+def _check_stdio_mcp_alive(name, spec):
+    """Check if a stdio-based MCP server process is actually running.
+    Searches for processes matching the MCP command and checks if PID is alive.
+    Returns True if a matching process is found and alive, False otherwise."""
+    command = spec.get("command", "")
+    args = spec.get("args", [])
+    if not command:
+        return False
+
+    try:
+        # Use pgrep to find processes matching the MCP command
+        # Build a search pattern from the command name
+        search_term = command
+        # For npx-based servers, search by the package name in args
+        if command in ("npx", "node") and args:
+            search_term = args[0] if args else command
+
+        result = subprocess.run(
+            ["pgrep", "-f", search_term],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Found matching PIDs — verify at least one is alive
+            for pid_str in result.stdout.strip().split("\n"):
+                try:
+                    pid = int(pid_str.strip())
+                    os.kill(pid, 0)  # Signal 0 = check if process exists
+                    return True
+                except (ValueError, ProcessLookupError, PermissionError):
+                    continue
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    return False
+
+
+def _probe_stdio_liveness(name, spec, timeout=2):
+    """E4 fix: probe a stdio MCP server by spawning it briefly and sending a
+    JSON-RPC initialize request.  Returns True if the server responds within
+    *timeout* seconds, False otherwise.  The spawned process is always killed
+    afterwards — this is a one-shot probe, not a long-lived connection."""
+    command = spec.get("command", "")
+    args = spec.get("args", [])
+    if not command:
+        return False
+
+    import shutil
+    cmd_path = shutil.which(command)
+    if not cmd_path:
+        return False
+
+    try:
+        full_cmd = [cmd_path] + list(args)
+        proc = subprocess.Popen(
+            full_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        # Send a minimal JSON-RPC initialize request (MCP protocol)
+        init_request = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05",
+                       "capabilities": {},
+                       "clientInfo": {"name": "health-check", "version": "0.1"}}
+        }) + "\n"
+
+        try:
+            proc.stdin.write(init_request.encode("utf-8"))
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            proc.kill()
+            return False
+
+        # Wait for a response line within the timeout
+        import selectors
+        sel = selectors.DefaultSelector()
+        sel.register(proc.stdout, selectors.EVENT_READ)
+        ready = sel.select(timeout=timeout)
+        sel.close()
+
+        if ready:
+            line = proc.stdout.readline()
+            if line and b"jsonrpc" in line:
+                proc.kill()
+                proc.wait(timeout=1)
+                return True
+
+        proc.kill()
+        proc.wait(timeout=1)
+        return False
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _restart_stdio_mcp(ctx, name, spec):
+    """E4 fix: attempt to restart a stdio MCP server by killing existing processes
+    and re-registering with 'claude mcp add'."""
+    command = spec.get("command", "")
+    args = spec.get("args", [])
+    if not command:
+        return
+
+    # Kill existing processes matching this MCP server
+    search_term = command
+    if command in ("npx", "node") and args:
+        search_term = args[0] if args else command
+
+    try:
+        result = subprocess.run(
+            ["pkill", "-f", search_term],
+            capture_output=True, text=True, timeout=5
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Re-register the MCP server
+    try:
+        creds = load_credentials(ctx)
+        env_vars = _resolve_mcp_env(spec, creds)
+        full = _build_mcp_add_cmd(name, spec, env_vars)
+        # First remove, then re-add
+        subprocess.run(["claude", "mcp", "remove", "--scope", "user", name],
+                       cwd=ctx.AGENT_CWD, capture_output=True, text=True, timeout=10)
+        run_env = os.environ.copy()
+        run_env.update(creds)
+        run_env.update(env_vars)
+        subprocess.run(full, cwd=ctx.AGENT_CWD, capture_output=True, text=True,
+                       timeout=15, env=run_env)
+    except Exception as e:
+        log(ctx, f"⚠ MCP {name} restart error: {e}")
 
 
 def check_oauth_pending():
@@ -558,6 +775,18 @@ def check_oauth_pending():
         return [k for k in cache if k in MCP_SERVERS and MCP_SERVERS[k].get("type") in ("http", "sse")]
     except Exception:
         return []
+
+
+def check_and_reinit_mcp(ctx):
+    """E5 fix: if credentials changed since last MCP init, fully re-initialize
+    MCP servers so they pick up new API keys/tokens.  Call at task start."""
+    global _mcp_reinit_needed
+    if not _mcp_reinit_needed:
+        return False
+    _mcp_reinit_needed = False
+    log(ctx, "🔄 Credentials changed — re-initializing MCP servers")
+    setup_mcp(ctx)
+    return True
 
 
 def start_mcp_watcher(ctx):

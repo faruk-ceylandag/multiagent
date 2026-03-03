@@ -12,6 +12,7 @@ import signal
 import json
 import socket
 import argparse
+import threading
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
@@ -111,6 +112,7 @@ if _args.daemon:
     _daemon_fd = open(_daemon_log, "a")
     os.dup2(_daemon_fd.fileno(), sys.stdout.fileno())
     os.dup2(_daemon_fd.fileno(), sys.stderr.fileno())
+    _daemon_fd.close()  # FD has been duplicated; close original to avoid leak
     # Write daemon PID file
     with open(os.path.join(MA_DIR, ".daemon.pid"), "w") as f:
         f.write(str(os.getpid()))
@@ -173,7 +175,7 @@ def is_own_hub(port, ma_dir):
             pids = [p.strip() for p in r.stdout.strip().split("\n") if p.strip()]
             return str(old_pid) in pids
     except (OSError, ValueError):
-        pass
+        pass  # expected: pid file missing or stale
     return False
 
 def find_free_port(start_port, max_tries=20):
@@ -184,20 +186,43 @@ def find_free_port(start_port, max_tries=20):
             return port
     return None
 
+def _port_owner_info(port):
+    """Get details about what process is using a port."""
+    try:
+        r = subprocess.run(["lsof", "-i", f":{port}", "-P", "-n"], capture_output=True, text=True, timeout=5)
+        if r.stdout.strip():
+            lines = r.stdout.strip().split("\n")
+            # Return header + first few process lines for clarity
+            return "\n    ".join(lines[:5])
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return f"(could not identify process on port {port})"
+
 if not port_free(HUB_PORT):
+    port_info = _port_owner_info(HUB_PORT)
+    warn(f"Port {HUB_PORT} is in use:\n    {port_info}")
     if is_own_hub(HUB_PORT, MA_DIR):
         # Same workspace — kill old instance and reuse port
         r = subprocess.run(["lsof", "-ti", f":{HUB_PORT}"], capture_output=True, text=True)
         for pid in r.stdout.strip().split("\n"):
             if pid.strip():
                 try: os.kill(int(pid.strip()), signal.SIGTERM)
-                except OSError: pass
-        time.sleep(1)
-        if not port_free(HUB_PORT): err(f"Port {HUB_PORT} busy (own hub won't stop)")
+                except OSError: pass  # expected: process already exited
+        # Wait with timeout for port to become free
+        _port_wait_start = time.time()
+        _port_wait_timeout = 10  # seconds
+        while not port_free(HUB_PORT):
+            if time.time() - _port_wait_start > _port_wait_timeout:
+                err(f"Port {HUB_PORT} still busy after {_port_wait_timeout}s — old hub won't release port.\n"
+                    f"    Try: kill -9 $(lsof -ti :{HUB_PORT})")
+            time.sleep(0.5)
+        log(f"Old hub released port {HUB_PORT}")
     else:
         # Different workspace is using this port — find another one
         new_port = find_free_port(HUB_PORT + 1)
-        if not new_port: err(f"Port {HUB_PORT} busy (another instance) and no free ports found")
+        if not new_port:
+            err(f"Port {HUB_PORT} busy (another instance) and no free ports found in range {HUB_PORT+1}-{HUB_PORT+20}.\n"
+                f"    Process on port:\n    {port_info}")
         warn(f"Port {HUB_PORT} in use by another instance → using {new_port}")
         HUB_PORT = new_port
         HUB_URL = f"http://127.0.0.1:{HUB_PORT}"
@@ -412,6 +437,117 @@ for f in ["config.py", "roles.py", "memory.py", "__init__.py"]:
 if not os.path.exists(os.path.join(lib_dst, "__init__.py")):
     open(os.path.join(lib_dst, "__init__.py"), "w").close()
 
+# ── Cleanup (defined before any subprocess is started) ──
+hub_proc = None   # forward declaration; set when hub is launched
+hub_log = None    # forward declaration; set when hub log is opened
+workers = {}      # forward declaration; populated when workers launch
+
+def _get_all_child_pids(parent_pid):
+    """Recursively get all descendant PIDs of a process."""
+    children = []
+    try:
+        r = subprocess.run(["pgrep", "-P", str(parent_pid)], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.strip().split("\n"):
+            pid = line.strip()
+            if pid:
+                pid = int(pid)
+                children.append(pid)
+                children.extend(_get_all_child_pids(pid))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return children
+
+_cleanup_running = False
+_cleanup_lock = threading.Lock()
+def cleanup(sig=None, frame=None):
+    global _cleanup_running
+    with _cleanup_lock:
+        if _cleanup_running:
+            return
+        _cleanup_running = True
+    print(f"\n{DIM}Shutting down...{NC}")
+    # Signal hub to save state before terminating
+    try:
+        import urllib.request
+        urllib.request.urlopen(f"{HUB_URL}/health", timeout=2)
+    except Exception:
+        pass  # best-effort: hub may already be unreachable
+
+    # Collect ALL descendant PIDs before killing (workers + their claude subprocesses)
+    all_pids = set()
+    for name, w in workers.items():
+        try:
+            pid = w["proc"].pid
+            all_pids.add(pid)
+            all_pids.update(_get_all_child_pids(pid))
+        except (OSError, ProcessLookupError):
+            pass  # expected: process already exited
+
+    # Phase 1: SIGTERM — process groups + hub
+    for name, w in workers.items():
+        try:
+            pgid = os.getpgid(w["proc"].pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            try: w["proc"].terminate()
+            except OSError: pass  # expected: process already exited
+    if hub_proc:
+        try: hub_proc.terminate()
+        except OSError: pass  # expected: process already exited
+
+    # Wait briefly for graceful shutdown
+    time.sleep(2)
+
+    # Phase 2: SIGKILL anything still alive (workers, claude CLIs, MCP servers)
+    for name, w in workers.items():
+        try:
+            pgid = os.getpgid(w["proc"].pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass  # expected: process group already exited
+        try: w["proc"].kill()
+        except OSError: pass  # expected: process already exited
+    for pid in all_pids:
+        try: os.kill(pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError): pass  # expected: process already exited
+
+    # Phase 3: Kill hub
+    if hub_proc:
+        try: hub_proc.kill(); hub_proc.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired): pass  # expected: process already exited or won't respond
+
+    # Phase 4: Sweep any orphaned processes from our session dirs
+    try:
+        r = subprocess.run(
+            ["pgrep", "-f", f"agents.worker.*{MA_DIR}|claude.*{MA_DIR}|uvicorn.*hub"],
+            capture_output=True, text=True, timeout=5)
+        my_pid = os.getpid()
+        for line in r.stdout.strip().split("\n"):
+            pid = line.strip()
+            if pid and int(pid) != my_pid:
+                try: os.kill(int(pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError): pass  # expected: process already exited
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # best-effort orphan sweep; pgrep may not be available
+
+    # Close log handles
+    for name, w in workers.items():
+        try: w["log_fh"].close()
+        except OSError: pass
+    if hub_log:
+        try: hub_log.close()
+        except OSError: pass
+    # Clean up PID/port files
+    for pf in [".hub.pid", ".hub.port", ".daemon.pid", ".worker_pids"]:
+        try: os.remove(os.path.join(MA_DIR, pf))
+        except OSError: pass
+    print(f"{G}✓ All stopped{NC}")
+    sys.exit(0)
+
+# Install signal handlers BEFORE any subprocess is started
+signal.signal(signal.SIGINT, cleanup)
+signal.signal(signal.SIGTERM, cleanup)
+
 # ── Start Hub ──
 hub_log_path = os.path.join(MA_DIR, "logs", "hub.log")
 hub_log = open(hub_log_path, "w")
@@ -450,7 +586,42 @@ with open(os.path.join(MA_DIR, ".hub.pid"), "w") as f: f.write(str(hub_proc.pid)
 with open(os.path.join(MA_DIR, ".hub.port"), "w") as f: f.write(str(HUB_PORT))
 log(f"Hub on :{HUB_PORT}")
 
-# ── Kill orphaned workers from previous run ──
+# ── Kill orphaned workers from previous run (PID file + pgrep fallback) ──
+_worker_pid_file = os.path.join(MA_DIR, ".worker_pids")
+_orphans_killed = 0
+# Phase 1: PID file based cleanup (reliable, no pattern matching)
+if os.path.exists(_worker_pid_file):
+    try:
+        with open(_worker_pid_file) as f:
+            _old_pids = [line.strip() for line in f if line.strip()]
+        for pid_str in _old_pids:
+            try:
+                pid = int(pid_str)
+                if pid == os.getpid():
+                    continue
+                # Check if process is still alive
+                os.kill(pid, 0)
+                # Still alive — send SIGTERM
+                os.kill(pid, signal.SIGTERM)
+                _orphans_killed += 1
+                log(f"Killed orphaned worker (PID {pid})")
+            except (OSError, ValueError):
+                pass  # expected: process already exited or invalid PID
+        if _orphans_killed:
+            time.sleep(2)  # Give them time to exit gracefully
+            # SIGKILL any that didn't respond to SIGTERM
+            for pid_str in _old_pids:
+                try:
+                    pid = int(pid_str)
+                    os.kill(pid, 0)  # check if still alive
+                    os.kill(pid, signal.SIGKILL)
+                    log(f"Force-killed orphaned worker (PID {pid})")
+                except (OSError, ValueError):
+                    pass  # expected: process already exited
+    except (OSError, IOError):
+        pass  # expected: PID file unreadable
+
+# Phase 2: pgrep fallback (catches workers not in PID file)
 try:
     r = subprocess.run(["pgrep", "-f", f"agents.worker.*{MA_DIR}"], capture_output=True, text=True, timeout=5)
     for pid_str in r.stdout.strip().split("\n"):
@@ -459,16 +630,16 @@ try:
             try:
                 os.kill(int(pid_str), signal.SIGTERM)
                 log(f"Killed orphaned worker (PID {pid_str})")
+                _orphans_killed += 1
             except (OSError, ValueError):
-                pass
+                pass  # expected: orphaned process already exited
     if r.stdout.strip():
         time.sleep(1)  # Give them time to exit
 except (OSError, subprocess.TimeoutExpired):
-    pass
+    pass  # best-effort: pgrep may not be available or timed out
 
 # ── Launch Workers (staggered to avoid rate limits) ──
 python = sys.executable
-workers = {}
 BOOT_STAGGER = cfg.get("boot_stagger", 1)  # seconds between agent boots (no API call at boot, so minimal stagger)
 
 from lib.config import MODEL_ALIASES
@@ -519,111 +690,15 @@ for i, agent in enumerate(AGENTS):
     if i < len(AGENTS) - 1:
         time.sleep(BOOT_STAGGER)
 
+# ── Save worker PIDs for orphan detection on next restart ──
+with open(os.path.join(MA_DIR, ".worker_pids"), "w") as f:
+    for name, w in workers.items():
+        f.write(f"{w['proc'].pid}\n")
+
 # ── Browser ──
 url = f"http://localhost:{HUB_PORT}"
 try: import webbrowser; webbrowser.open(url)
-except Exception: pass
-
-# ── Cleanup ──
-def _get_all_child_pids(parent_pid):
-    """Recursively get all descendant PIDs of a process."""
-    children = []
-    try:
-        r = subprocess.run(["pgrep", "-P", str(parent_pid)], capture_output=True, text=True, timeout=5)
-        for line in r.stdout.strip().split("\n"):
-            pid = line.strip()
-            if pid:
-                pid = int(pid)
-                children.append(pid)
-                children.extend(_get_all_child_pids(pid))
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        pass
-    return children
-
-_cleanup_running = False
-def cleanup(sig=None, frame=None):
-    global _cleanup_running
-    if _cleanup_running:
-        return
-    _cleanup_running = True
-    print(f"\n{DIM}Shutting down...{NC}")
-    # Signal hub to save state before terminating
-    try:
-        import urllib.request
-        urllib.request.urlopen(f"{HUB_URL}/health", timeout=2)
-    except Exception:
-        pass
-
-    # Collect ALL descendant PIDs before killing (workers + their claude subprocesses)
-    all_pids = set()
-    for name, w in workers.items():
-        try:
-            pid = w["proc"].pid
-            all_pids.add(pid)
-            all_pids.update(_get_all_child_pids(pid))
-        except (OSError, ProcessLookupError):
-            pass
-
-    # Phase 1: SIGTERM — process groups + hub
-    for name, w in workers.items():
-        try:
-            pgid = os.getpgid(w["proc"].pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except (OSError, ProcessLookupError):
-            try: w["proc"].terminate()
-            except OSError: pass
-    try: hub_proc.terminate()
-    except OSError: pass
-
-    # Wait briefly for graceful shutdown
-    time.sleep(2)
-
-    # Phase 2: SIGKILL anything still alive (workers, claude CLIs, MCP servers)
-    for name, w in workers.items():
-        try:
-            pgid = os.getpgid(w["proc"].pid)
-            os.killpg(pgid, signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            pass
-        try: w["proc"].kill()
-        except OSError: pass
-    for pid in all_pids:
-        try: os.kill(pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError): pass
-
-    # Phase 3: Kill hub
-    try: hub_proc.kill(); hub_proc.wait(timeout=3)
-    except Exception: pass
-
-    # Phase 4: Sweep any orphaned processes from our session dirs
-    try:
-        r = subprocess.run(
-            ["pgrep", "-f", f"agents.worker.*{MA_DIR}|claude.*{MA_DIR}|uvicorn.*hub"],
-            capture_output=True, text=True, timeout=5)
-        my_pid = os.getpid()
-        for line in r.stdout.strip().split("\n"):
-            pid = line.strip()
-            if pid and int(pid) != my_pid:
-                try: os.kill(int(pid), signal.SIGKILL)
-                except (OSError, ProcessLookupError): pass
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-
-    # Close log handles
-    for name, w in workers.items():
-        try: w["log_fh"].close()
-        except OSError: pass
-    try: hub_log.close()
-    except OSError: pass
-    # Clean up PID/port files
-    for pf in [".hub.pid", ".hub.port", ".daemon.pid"]:
-        try: os.remove(os.path.join(MA_DIR, pf))
-        except OSError: pass
-    print(f"{G}✓ All stopped{NC}")
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, cleanup)
-signal.signal(signal.SIGTERM, cleanup)
+except Exception: pass  # non-critical: browser open is best-effort
 
 _visible_names = [a["name"] if isinstance(a, dict) else a for a in AGENTS if not (isinstance(a, dict) and a.get("hidden"))]
 _hidden_names = [a["name"] if isinstance(a, dict) else a for a in AGENTS if isinstance(a, dict) and a.get("hidden")]
@@ -682,6 +757,13 @@ def check_new_agents():
             ensure_perms(sd)
             pid = launch_worker(agent_cfg)
             log(f"{name} spawned (PID {pid})")
+        # Update PID file with new workers
+        try:
+            with open(os.path.join(MA_DIR, ".worker_pids"), "w") as _pf:
+                for _wn, _wv in workers.items():
+                    _pf.write(f"{_wv['proc'].pid}\n")
+        except OSError:
+            pass
     except Exception as e:
         warn(f"New agent check error: {e}")
 
@@ -713,6 +795,13 @@ def check_auto_scale():
                 ensure_perms(sd)
                 pid = launch_worker(agent_cfg)
                 log(f"📈 Auto-scaled: {name} (PID {pid})")
+                # Update PID file with new worker
+                try:
+                    with open(os.path.join(MA_DIR, ".worker_pids"), "w") as _pf:
+                        for _wn, _wv in workers.items():
+                            _pf.write(f"{_wv['proc'].pid}\n")
+                except OSError:
+                    pass
     except Exception as e:
         warn(f"Auto-scale check error: {e}")
 
@@ -744,7 +833,8 @@ while True:
                         req = urllib.request.Request(f"{HUB_URL}/agents/status", data=payload,
                                                      headers={"Content-Type": "application/json"})
                         urllib.request.urlopen(req, timeout=3)
-                    except Exception: pass
+                    except Exception as e:
+                        warn(f"Failed to report {name} offline to hub: {e}")
                     continue
                 warn(f"{name} died (exit={rc}), restart #{restarts+1}...")
                 # Report crash to hub
@@ -755,14 +845,22 @@ while True:
                     req = urllib.request.Request(f"{HUB_URL}/health/crash", data=payload,
                                                  headers={"Content-Type": "application/json"})
                     urllib.request.urlopen(req, timeout=3)
-                except Exception: pass
+                except Exception as e:
+                    warn(f"Failed to report {name} crash to hub: {e}")
                 backoff = min(60, BOOT_STAGGER * (2 ** min(restarts, 5)))
                 warn(f"{name} restarting in {backoff}s (attempt #{restarts+1})")
                 time.sleep(backoff)
                 try: w["log_fh"].close()
-                except OSError: pass
+                except OSError: pass  # expected: log handle may already be closed
                 pid = launch_worker(agent)
                 workers[name]["restarts"] = restarts + 1
                 workers[name]["last_crash"] = time.time()
                 log(f"{name} restarted (PID {pid})")
+                # Update PID file so orphan detection stays current
+                try:
+                    with open(os.path.join(MA_DIR, ".worker_pids"), "w") as _pf:
+                        for _wn, _wv in workers.items():
+                            _pf.write(f"{_wv['proc'].pid}\n")
+                except OSError:
+                    pass
     except KeyboardInterrupt: cleanup()

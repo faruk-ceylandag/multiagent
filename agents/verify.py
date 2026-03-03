@@ -1,11 +1,28 @@
 """agents/verify.py — Verification loop (lint, test, build) with retry."""
-import os, time
+import os, time, threading
 from .log_utils import log
 from .hub_client import hub_post, hub_msg, set_status
 from .git_ops import git, git_changed_files
 from .learning import read_file, run_hook, get_verify_cmds
 
 VERIFY_HARD_TIMEOUT = 600  # 10 minutes
+
+# Common config files that indicate a project has a build/test/lint system
+_BUILD_CONFIGS = [
+    "package.json", "Makefile", "pyproject.toml", "setup.py", "setup.cfg",
+    "Cargo.toml", "go.mod", "build.gradle", "pom.xml", "CMakeLists.txt",
+    "Gemfile", "tox.ini", ".eslintrc", ".eslintrc.js", ".eslintrc.json",
+    "tsconfig.json", "Gruntfile.js", "Gulpfile.js", "webpack.config.js",
+    "jest.config.js", "pytest.ini", ".flake8", "ruff.toml",
+]
+
+
+def _has_build_system(project_dir):
+    """Check if a project directory has any recognizable build/test config."""
+    for cfg in _BUILD_CONFIGS:
+        if os.path.exists(os.path.join(project_dir, cfg)):
+            return True
+    return False
 
 
 def should_skip_verify(ctx, project):
@@ -34,6 +51,9 @@ def verify_loop(ctx, project, call_claude_fn):
     d = os.path.join(ctx.WORKSPACE, project)
     if not os.path.isdir(d):
         return True
+    if not _has_build_system(d):
+        log(ctx, f"⏭ skip verify (no build/test config detected in {project})")
+        return True
     _, diff = git(ctx, ["diff", "--stat", "HEAD"], d)
     if not diff:
         return True
@@ -49,15 +69,16 @@ def verify_loop(ctx, project, call_claude_fn):
     run_hook(ctx, "on-verify", {"project": project, "files": list(changed)[:20]})
 
     # Adaptive cycle count based on number of changed files
-    max_cycles = 3
-    if len(changed) <= 1:
-        max_cycles = 2
-    elif len(changed) <= 5:
+    # Floor of 2 ensures at least one retry opportunity (V3 fix)
+    if len(changed) > 5:
+        max_cycles = 3
+    else:
         max_cycles = 2
 
     _verify_start = time.time()
     for i in range(1, max_cycles + 1):
-        if time.time() - _verify_start > VERIFY_HARD_TIMEOUT:
+        remaining = VERIFY_HARD_TIMEOUT - (time.time() - _verify_start)
+        if remaining <= 0:
             log(ctx, "⏱ VERIFY TIMEOUT (10 min hard limit)")
             hub_msg(ctx, "user", f"⏱ {ctx.AGENT_NAME}: verify timed out on {project} (10 min limit)", "blocker")
             return False
@@ -97,8 +118,30 @@ Also: echo "tests_passed=N tests_failed=N tests_skipped=N lint_errors=N" > {ctx.
 (lint_errors = only NEW errors in changed files, not pre-existing)
 If FAIL: fix issues then recheck. Do NOT give up — iterate until tests pass."""
 
-        call_claude_fn(verify_prompt, retries=1, force_model=ctx.MODEL_SONNET, cwd=d,
-                       continue_session=True)
+        # LB-7: Set a timer to kill the subprocess if it exceeds the hard timeout
+        _timed_out = threading.Event()
+        def _kill_on_timeout():
+            _timed_out.set()
+            proc = getattr(ctx, 'current_proc', None)
+            if proc:
+                log(ctx, "⏱ VERIFY hard timeout — killing subprocess")
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+        _timer = threading.Timer(remaining, _kill_on_timeout)
+        _timer.daemon = True
+        _timer.start()
+        try:
+            call_claude_fn(verify_prompt, retries=1, force_model=ctx.MODEL_SONNET, cwd=d,
+                           continue_session=True)
+        finally:
+            _timer.cancel()
+
+        if _timed_out.is_set():
+            log(ctx, "⏱ VERIFY TIMEOUT (10 min hard limit)")
+            hub_msg(ctx, "user", f"⏱ {ctx.AGENT_NAME}: verify timed out on {project} (10 min limit)", "blocker")
+            return False
 
         try:
             with open(ctx.VERIFY_FILE) as f:
@@ -106,6 +149,10 @@ If FAIL: fix issues then recheck. Do NOT give up — iterate until tests pass.""
         except OSError:
             result = "UNKNOWN"
             log(ctx, f"⚠ Verify file not written (attempt {i}/{max_cycles}) — Claude may lack tool permissions")
+            # If Claude returned but didn't write the result file, don't retry —
+            # subsequent attempts are unlikely to succeed either
+            hub_msg(ctx, "user", f"⚠️ {ctx.AGENT_NAME}: verify result file not written on {project}", "blocker")
+            return False
 
         test_data = {}
         try:

@@ -9,7 +9,7 @@ let logLines = {}, logSearch = '', soundOn = false, notifOn = false;
 let mergedMode = false, _inboxAgent = '';
 let activeWorkspace = 'all';
 let _prevTaskStatuses = {};
-let _ws = null, _wsRetries = 0, _wsMaxRetries = 10, _wsConnected = false;
+let _ws = null, _wsRetries = 0, _wsMaxRetries = 20, _wsConnected = false, _wsPingTimer = null;
 let _httpPollTimer = null;
 const _isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 const _mod = _isMac ? '⌘' : 'Ctrl';
@@ -36,6 +36,25 @@ function toast(msg, type='info', duration=4000) {
     el.classList.add('toast-hide');
     setTimeout(() => el.remove(), 300);
   }, duration);
+}
+
+// ══════════════════════════════════
+//  LOADING INDICATOR
+// ══════════════════════════════════
+function showLoading(msg) {
+  let el = document.getElementById('loading-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'loading-overlay';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px;background:#1a73e8;color:#fff;text-align:center;z-index:9999;font-size:14px;';
+    document.body.prepend(el);
+  }
+  el.textContent = msg || 'Working...';
+  el.style.display = 'block';
+}
+function hideLoading() {
+  const el = document.getElementById('loading-overlay');
+  if (el) el.style.display = 'none';
 }
 
 function detectTaskChanges(newData) {
@@ -107,6 +126,24 @@ function connectWebSocket() {
     _wsRetries = 0;
     updateConnectionStatus('connected');
     _stopHttpFallback();
+    // D3: Force full refresh on reconnect — hub may have restarted with reset version
+    // Clear all cached data so stale state is never shown after reconnect
+    _lastVersion = 0;
+    _lastAgentHash = '';
+    _lastTaskHash = '';
+    logLines = {};
+    data = {agents:{}, agent_names:[]};
+    _prevTaskStatuses = {};
+    renderSidebar([]);
+    renderPanel();
+    poll();
+    // D1: Start heartbeat ping to detect silent disconnects
+    if (_wsPingTimer) clearInterval(_wsPingTimer);
+    _wsPingTimer = setInterval(() => {
+      if (_ws && _ws.readyState === WebSocket.OPEN) {
+        try { _ws.send(JSON.stringify({type:'ping'})); } catch {}
+      }
+    }, 30000);
     // Follow selected agent's logs via WebSocket
     if(sel && tab==='logs'){
       _followingAgent='';
@@ -145,9 +182,11 @@ function connectWebSocket() {
     _wsConnected = false;
     _ws = null;
     _wsRetries++;
+    if (_wsPingTimer) { clearInterval(_wsPingTimer); _wsPingTimer = null; }
     updateConnectionStatus('reconnecting');
     if (_wsRetries <= _wsMaxRetries) {
-      const delay = Math.min(10000, 1000 * Math.pow(1.5, _wsRetries));
+      // D2: Cap reconnection backoff at 10s to avoid long stale-data windows
+      const delay = Math.min(10000, 1000 * Math.pow(1.3, _wsRetries));
       setTimeout(connectWebSocket, delay);
     } else {
       updateConnectionStatus('offline');
@@ -191,6 +230,13 @@ setInterval(()=>{
 let _lastVersion = 0, _lastAgentHash = '', _lastTaskHash = '';
 function _applyDashboardData(d) {
   detectTaskChanges(d);
+  // D3: Detect hub restart — version resets from high to low
+  if (d.version && _lastVersion > 0 && d.version < _lastVersion) {
+    _lastVersion = 0;
+    _lastAgentHash = '';
+    _lastTaskHash = '';
+    logLines = {};
+  }
   const taskHash = (d.tasks||[]).map(t=>`${t.id}:${t.status}`).join('|');
   const panelNeedsUpdate = (tab === 'tasks' && taskHash !== _lastTaskHash) ||
     (d.version && d.version !== _lastVersion && tab !== 'logs');
@@ -512,6 +558,8 @@ function buildAgentProgress(a){
 function getAgentTokens(n){const u=(data.usage||{})[n];return u?(u.tokens_in||0)+(u.tokens_out||0):0;}
 function formatTokens(n){return n>1e6?(n/1e6).toFixed(1)+'M':n>1e3?(n/1e3).toFixed(1)+'K':n+'';}
 function formatCost(c){if(c==null||c===undefined)return'$0.00';c=parseFloat(c)||0;if(c===0)return'$0.00';if(c>=100)return'$'+c.toFixed(0);if(c>=1)return'$'+c.toFixed(2);if(c>=0.01)return'$'+c.toFixed(3);if(c>=0.001)return'$'+c.toFixed(4);if(c>0)return'$'+c.toFixed(5);return'$0.00';}
+// D5: Global unhandled promise rejection handler to prevent silent fetch failures
+window.addEventListener('unhandledrejection', (e) => { e.preventDefault(); console.warn('Unhandled rejection:', e.reason); });
 function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function escAttr(s){return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}  // safe for HTML attribute values
 function formatTime(ts){if(!ts)return'';try{return new Date(ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}catch{return ts;}}
@@ -1248,10 +1296,13 @@ async function createTask(){
   const deps=depsStr?depsStr.split(',').map(d=>parseInt(d.replace('#','').trim())).filter(n=>n>0):[];
   const skipReview=$('newTaskSkipReview')?.checked||false;
   const skipQa=$('newTaskSkipQa')?.checked||false;
-  await fetch(HUB+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({description:desc,assigned_to:agent,status:'created',depends_on:deps,priority:pri,created_by:'user',skip_review:skipReview,skip_qa:skipQa})});
-  $('newTaskDesc').value='';$('newTaskDeps').value='';
-  setTimeout(()=>{poll();renderPanel();},300);
+  showLoading('Creating task...');
+  try {
+    await fetch(HUB+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({description:desc,assigned_to:agent,status:'created',depends_on:deps,priority:pri,created_by:'user',skip_review:skipReview,skip_qa:skipQa})});
+    $('newTaskDesc').value='';$('newTaskDeps').value='';
+    setTimeout(()=>{poll();renderPanel();},300);
+  } finally { hideLoading(); }
 }
 
 async function assignTask(id){
@@ -1465,6 +1516,7 @@ async function createPR(project, branch) {
 }
 
 async function pushBranch(project) {
+  showLoading('Pushing to remote...');
   try {
     const r = await (await fetch(HUB + '/git/push', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1473,6 +1525,7 @@ async function pushBranch(project) {
     if (r.status === 'ok') toast('Pushed to origin/' + r.branch, 'success');
     else toast(r.message || 'Push failed', 'error');
   } catch (e) { toast('Error: ' + e, 'error'); }
+  finally { hideLoading(); }
 }
 
 async function inboxToTask(sender,content){
@@ -1562,10 +1615,20 @@ function renderInbox(p){
         if(m.msg_type==='plan_proposal'){
           const planId=m.plan_id;
           const steps=m.plan_steps||[];
+          const formFields=m.form_fields||[];
           // Check if plan was already approved/dismissed via pending_plans snapshot
           const planState=(data.pending_plans||{})[planId];
           const planStatus=planState?planState.status:'pending';
           const isDone=planStatus!=='pending';
+          // Render form fields (select / text) if present
+          const formHtml=formFields.length&&!isDone?`<div class="plan-form" data-plan-form="${planId}">${formFields.map(f=>{
+            const req=f.required?'<span style="color:var(--red);margin-left:2px">*</span>':'';
+            if(f.type==='select'){
+              const opts=(f.options||[]).map(o=>`<option value="${escAttr(o.value)}"${o.value===f.default?' selected':''}>${esc(o.label)}</option>`).join('');
+              return`<div class="plan-form-field"><label>${esc(f.label)}${req}</label><select data-key="${escAttr(f.key)}">${opts}</select></div>`;
+            }
+            return`<div class="plan-form-field"><label>${esc(f.label)}${req}</label><input type="text" data-key="${escAttr(f.key)}" value="${escAttr(f.default||'')}" placeholder="${escAttr(f.label)}"></div>`;
+          }).join('')}</div>`:'';
           const stepsHtml=steps.map((s,i)=>{
             const dep=s.depends_on_step!=null?`<span class="plan-dep">after step ${Number(s.depends_on_step)+1}</span>`:'';
             const assignee=s.assigned_to||'';
@@ -1584,6 +1647,7 @@ function renderInbox(p){
             :planStatus==='dismissed'?`<span style="font-size:11px;font-weight:600;color:var(--fg3)">Dismissed</span>`:'';
           return`<div class="chat-bubble chat-bubble-agent plan-proposal-bubble"${isDone?' style="opacity:0.6"':''}>
             <div class="plan-header"><span class="plan-badge">Plan</span><span class="plan-title">${miniMarkdown(displayContent)}</span></div>
+            ${formHtml}
             ${steps.length?`<div class="plan-steps">
               ${isDone?'':`<div class="plan-toolbar"><label class="plan-select-all"><input type="checkbox" checked onchange="toggleAllPlanSteps(this,${planId})"> Select all (${steps.length} steps)</label></div>`}
               ${stepsHtml}
@@ -2370,10 +2434,15 @@ async function startJiraCheck(type, issueKey, jiraUrl, agent) {
   } catch { toast('Failed to start Jira check', 'error'); }
 }
 
+let _slashHintIndex = -1;
+let _slashHintMatches = [];
+
 function _updateSlashHint(text) {
   let hint = $('slashHint');
   if (!text || !text.startsWith('/')) {
     if (hint) hint.style.display = 'none';
+    _slashHintIndex = -1;
+    _slashHintMatches = [];
     return;
   }
   // Hide route hint when typing slash commands
@@ -2383,10 +2452,14 @@ function _updateSlashHint(text) {
   const partial = text.split(/\s/)[0].toLowerCase();
   const matches = Object.entries(_slashCommands).filter(([k]) => k.startsWith(partial));
   if (!matches.length || (matches.length === 1 && matches[0][0] === partial && !text.includes(' '))) {
-    // Exact match or no matches — hide hint
     if (hint) hint.style.display = 'none';
+    _slashHintIndex = -1;
+    _slashHintMatches = [];
     return;
   }
+
+  _slashHintMatches = matches.slice(0, 8);
+  _slashHintIndex = 0;
 
   if (!hint) {
     hint = document.createElement('div');
@@ -2396,11 +2469,38 @@ function _updateSlashHint(text) {
     else return;
   }
   hint.style.display = 'block';
-  hint.innerHTML = matches.slice(0, 8).map(([k, v]) =>
-    `<div class="slash-hint-item" onmousedown="event.preventDefault();$('cmdInput').value='${k} ';$('cmdInput').focus();_updateSlashHint('${k} ');">
+  _renderSlashHintItems(hint);
+}
+
+function _renderSlashHintItems(hint) {
+  hint.innerHTML = _slashHintMatches.map(([k, v], i) =>
+    `<div class="slash-hint-item${i === _slashHintIndex ? ' active' : ''}" onmousedown="event.preventDefault();_selectSlashHint(${i});" onmouseenter="_slashHintIndex=${i};_renderSlashHintItems($('slashHint'));">
       <span class="slash-cmd">${esc(k)}</span>${v.args ? `<span class="slash-args">${esc(v.args)}</span>` : ''}
       <span class="slash-desc">${esc(v.desc)}</span></div>`
   ).join('');
+}
+
+function _selectSlashHint(idx) {
+  if (idx < 0 || idx >= _slashHintMatches.length) return;
+  const [k] = _slashHintMatches[idx];
+  const ci = $('cmdInput');
+  ci.value = k + ' ';
+  ci.focus();
+  _slashHintIndex = -1;
+  _slashHintMatches = [];
+  _updateSlashHint(ci.value);
+}
+
+function _navigateSlashHint(dir) {
+  if (!_slashHintMatches.length) return false;
+  const hint = $('slashHint');
+  if (!hint || hint.style.display === 'none') return false;
+  _slashHintIndex = (_slashHintIndex + dir + _slashHintMatches.length) % _slashHintMatches.length;
+  _renderSlashHintItems(hint);
+  // Scroll active item into view
+  const active = hint.querySelector('.slash-hint-item.active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+  return true;
 }
 
 // ── Expanded Editor (${_mod}+O) ──
@@ -2607,6 +2707,7 @@ async function sendCmd(){
   const input=$('cmdInput');const text=input.value.trim();if(!text)return;
   _sending=true;
   const btn=$('sendBtn');if(btn){btn.disabled=true;btn.textContent='...';}
+  showLoading('Sending...');
   try{
   // Clear input immediately to prevent double-send
   input.value='';autoResize(input);
@@ -2698,7 +2799,7 @@ async function sendCmd(){
   }
 
   setTimeout(poll,300);
-  }finally{_sending=false;const b=$('sendBtn');if(b){b.disabled=false;b.textContent='Send';}}
+  }finally{_sending=false;hideLoading();const b=$('sendBtn');if(b){b.disabled=false;b.textContent='Send';}}
 }
 
 function autoResize(el){
@@ -2768,15 +2869,18 @@ async function reviewChange(id,s){await fetch(HUB+'/changes/'+id+'/review',{meth
 async function commitChanges(project,inputId){
   const input=$(inputId);const msg=(input?.value||'').trim();
   if(!msg){toast('Commit message required','warn');return;}
+  showLoading('Committing changes...');
   try{
     const r=await(await fetch(HUB+'/git/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project,message:msg})})).json();
     if(r.status==='ok'){toast(`✅ Committed ${r.hash} to ${r.branch}`,'success',4000);fetchChanges();fetchInbox();poll();}
     else toast('❌ '+r.message,'error',5000);
   }catch(e){toast('Commit error: '+e,'error');}
+  finally{hideLoading();}
 }
 async function commitAndPush(project,inputId){
   const input=$(inputId);const msg=(input?.value||'').trim();
   if(!msg){toast('Commit message required','warn');return;}
+  showLoading('Committing and pushing...');
   try{
     const r=await(await fetch(HUB+'/git/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project,message:msg})})).json();
     if(r.status!=='ok'){toast('❌ '+r.message,'error',5000);return;}
@@ -2786,6 +2890,7 @@ async function commitAndPush(project,inputId){
     else toast('⚠️ Push failed: '+p.message,'warn',5000);
     fetchChanges();fetchInbox();poll();
   }catch(e){toast('Error: '+e,'error');}
+  finally{hideLoading();}
 }
 async function discardChanges(project){
   if(!confirm(`Discard ALL uncommitted changes in "${project}"?`))return;
@@ -2822,9 +2927,15 @@ async function approvePlan(planId){
   const selected=[];
   bubble.querySelectorAll(`input[data-plan="${planId}"]:checked`).forEach(cb=>selected.push(Number(cb.dataset.idx)));
   if(!selected.length){toast('Select at least one step','warn');return;}
+  // Collect form field values if present
+  const formValues={};
+  const formEl=bubble.querySelector(`.plan-form[data-plan-form="${planId}"]`);
+  if(formEl){
+    formEl.querySelectorAll('select[data-key], input[data-key]').forEach(el=>{formValues[el.dataset.key]=el.value;});
+  }
   bubble.querySelectorAll('.plan-btn').forEach(b=>b.disabled=true);
   try{
-    const r=await(await fetch(HUB+'/plan/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan_id:planId,selected_steps:selected})})).json();
+    const r=await(await fetch(HUB+'/plan/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan_id:planId,selected_steps:selected,form_values:formValues})})).json();
     if(r.status==='ok'){
       toast(`Plan approved — ${r.tasks_created.length} task(s) created`,'success',4000);
       _markPlanDone(bubble, `Approved — ${r.tasks_created.length} task(s) created`, 'var(--green)');
@@ -3151,7 +3262,15 @@ const ci=$('cmdInput');
 if(ci){
   ci.addEventListener('input',e=>{updateRouteHint(e.target.value);_updateSlashHint(e.target.value);_updateMentionHint(e.target.value,e.target.selectionStart);});
   ci.addEventListener('keydown',e=>{
-    if(e.key==='Enter'&&!e.shiftKey&&!e.ctrlKey&&!e.metaKey){e.preventDefault();sendCmd();}
+    // Slash hint keyboard navigation
+    if(e.key==='ArrowDown'&&_navigateSlashHint(1)){e.preventDefault();return;}
+    if(e.key==='ArrowUp'&&_navigateSlashHint(-1)){e.preventDefault();return;}
+    if(e.key==='Tab'&&_slashHintMatches.length>0&&$('slashHint')?.style.display!=='none'){e.preventDefault();_selectSlashHint(_slashHintIndex>=0?_slashHintIndex:0);return;}
+    if(e.key==='Enter'&&!e.shiftKey&&!e.ctrlKey&&!e.metaKey){
+      if(_slashHintMatches.length>0&&_slashHintIndex>=0&&$('slashHint')?.style.display!=='none'){e.preventDefault();_selectSlashHint(_slashHintIndex);return;}
+      e.preventDefault();sendCmd();
+    }
+    if(e.key==='Escape'&&_slashHintMatches.length>0){const sh=$('slashHint');if(sh){sh.style.display='none';}_slashHintIndex=-1;_slashHintMatches=[];e.preventDefault();return;}
   });
   setTimeout(()=>ci.focus(),100);
 }

@@ -1,6 +1,12 @@
-"""lib/config.py — Config system + stack detection + routing"""
+"""lib/config.py — Config system + stack detection + routing
+
+E9 fix: validate_config() provides basic schema validation for multiagent.json.
+"""
 import os
 import json
+import logging
+
+_config_logger = logging.getLogger("config")
 
 DEFAULT_PORT = 8040
 MODEL_ALIASES = {
@@ -85,8 +91,7 @@ def load_config(workspace: str) -> dict:
                             agents.append(entry)
                     cfg["agents"] = agents
             except Exception as e:
-                import logging
-                logging.getLogger("config").warning(f"Config parse error: {e}")
+                _config_logger.warning(f"Config parse error: {e}")
             break
     # Model aliases: merge user overrides with defaults
     user_aliases = cfg.get("model_aliases", {})
@@ -115,7 +120,84 @@ def load_config(workspace: str) -> dict:
                     "port": DEFAULT_PORT, "boot_stagger": 2, "max_context": 12000,
                     "budget_limit": 0, "budget_per_agent": 0, "escalation_threshold": 3,
                 }.get(key, 0)
+    # E9 fix: validate the loaded config and log warnings
+    validate_config(cfg)
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# E9 fix: basic schema validation for multiagent.json
+# ---------------------------------------------------------------------------
+
+# Known top-level keys (anything else triggers a warning)
+_KNOWN_TOP_LEVEL_KEYS = {
+    "port", "agents", "focus_project", "max_retries", "auto_verify",
+    "auto_gitignore", "notifications", "thinking_model", "coding_model",
+    "boot_stagger", "max_context", "mcp_servers", "budget_limit",
+    "budget_per_agent", "notifications_webhook", "auto_scale",
+    "auto_uat", "auto_uat_timeout", "auto_plan_approval",
+    "auto_plan_single_step", "escalation_threshold", "add_dirs",
+    "model_policy", "model_aliases",
+    # Internal keys added by load_config
+    "_model_aliases",
+}
+
+# Valid role keywords (non-exhaustive, for soft warning)
+_KNOWN_ROLES = {
+    "architect", "frontend", "backend", "qa", "devops", "designer",
+    "reviewer", "fullstack", "mobile", "data", "security", "infra",
+    "system architect", "team lead",
+}
+
+
+def validate_config(config):
+    """E9 fix: validate a loaded multiagent config dict and log warnings.
+
+    This is intentionally lenient — it logs warnings but never raises or
+    modifies the config.  Called from ``load_config()`` after merging
+    user config with defaults.
+    """
+    warnings = []
+
+    # 1. agents dict must exist and be a list
+    agents = config.get("agents")
+    if agents is None:
+        warnings.append("Missing 'agents' key — using defaults")
+    elif not isinstance(agents, list):
+        warnings.append(f"'agents' should be a list, got {type(agents).__name__}")
+    else:
+        # 2. Each agent needs at minimum a name; model gets a default if missing
+        for i, agent in enumerate(agents):
+            if isinstance(agent, dict):
+                if not agent.get("name"):
+                    warnings.append(f"Agent at index {i} has no 'name'")
+                if not agent.get("model") and not agent.get("hidden"):
+                    # Not a warning — model defaults are fine, but note it
+                    pass
+                # Soft-check role value
+                role = agent.get("role", "").lower()
+                if role and not any(r in role for r in _KNOWN_ROLES):
+                    warnings.append(f"Agent '{agent.get('name', i)}' has unusual role: '{role}'")
+            elif not isinstance(agent, str):
+                warnings.append(f"Agent at index {i} should be dict or str, got {type(agent).__name__}")
+
+    # 3. Warn on unknown top-level keys
+    unknown = set(config.keys()) - _KNOWN_TOP_LEVEL_KEYS
+    if unknown:
+        warnings.append(f"Unknown top-level keys (typo?): {', '.join(sorted(unknown))}")
+
+    # 4. Type checks for critical fields
+    if "port" in config and not isinstance(config["port"], (int, float)):
+        warnings.append(f"'port' should be a number, got {type(config['port']).__name__}")
+    if "mcp_servers" in config and config["mcp_servers"] is not None:
+        if not isinstance(config["mcp_servers"], dict):
+            warnings.append(f"'mcp_servers' should be a dict or null, got {type(config['mcp_servers']).__name__}")
+
+    # Log all warnings
+    for w in warnings:
+        _config_logger.warning(f"Config validation: {w}")
+
+    return warnings
 
 
 def save_default_config(workspace: str):
@@ -143,8 +225,7 @@ def save_default_config(workspace: str):
     try:
         with open(path, "w") as f: json.dump(sample, f, indent=2)
     except Exception as e:
-        import logging
-        logging.getLogger("config").warning(f"Config write error: {e}")
+        _config_logger.warning(f"Config write error: {e}")
 
 
 _PROJECT_MARKERS = {"package.json", "composer.json", "go.mod", "Cargo.toml",

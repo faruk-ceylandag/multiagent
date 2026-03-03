@@ -408,7 +408,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 /* ── Slash Command Hints ── */
 #slashHint { display:none; background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:4px; margin:0 12px; max-height:240px; overflow-y:auto; box-shadow:0 -4px 16px rgba(0,0,0,0.2); }
 .slash-hint-item { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:4px; cursor:pointer; font-size:11px; transition:background .1s; }
-.slash-hint-item:hover { background:var(--bg3); }
+.slash-hint-item:hover, .slash-hint-item.active { background:var(--bg3); }
 .slash-cmd { color:var(--ac); font-weight:600; font-family:'SF Mono',Consolas,monospace; min-width:80px; }
 .slash-args { color:var(--fg3); font-family:'SF Mono',Consolas,monospace; font-size:10px; }
 .slash-desc { color:var(--fg2); flex:1; text-align:right; font-size:10px; }
@@ -541,6 +541,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .plan-btn-approve { background:var(--green); color:#000; box-shadow:0 1px 3px rgba(63,185,80,0.3); }
 .plan-btn-dismiss { background:transparent; color:var(--fg3); border:1px solid var(--border); }
 .plan-btn-dismiss:hover { border-color:var(--fg3); color:var(--fg2); }
+.plan-form { display:flex; flex-wrap:wrap; gap:10px; padding:10px 16px 8px; border-bottom:1px solid var(--border); background:color-mix(in srgb, var(--ac) 3%, var(--bg)); }
+.plan-form-field { display:flex; flex-direction:column; gap:3px; min-width:140px; flex:1; }
+.plan-form-field label { font-size:10px; font-weight:600; color:var(--fg3); text-transform:uppercase; letter-spacing:.5px; }
+.plan-form-field select, .plan-form-field input[type="text"] { font-size:12px; padding:5px 8px; background:var(--bg2); border:1px solid var(--border); border-radius:5px; color:var(--fg); outline:none; transition:border-color .15s; }
+.plan-form-field select:focus, .plan-form-field input[type="text"]:focus { border-color:var(--ac); }
 
 /* ── Hub Log Humanized ── */
 .hub-call-human { color:var(--fg2); font-size:10px; font-style:italic; }

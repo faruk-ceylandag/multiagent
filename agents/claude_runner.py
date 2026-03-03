@@ -165,36 +165,70 @@ def check_rl(ctx):
     return True, ""
 
 
-def handle_rl(ctx, stderr, code):
-    indicators = ["rate limit", "429", "too many requests", "quota exceeded", "usage limit", "overloaded"]
+def _is_rate_limit_error(stderr, code):
+    """C6: Detect rate limiting from structured error context, not loose substring matching.
+    Requires indicators to appear in error-like lines (stderr lines starting with 'error',
+    JSON error fields, or HTTP 429 status), avoiding false positives from regular output
+    that merely mentions rate limits."""
+    if code == 0:
+        return False
     low = stderr.lower()
-    if code != 0 and any(i in low for i in indicators):
-        backoff = 60
-        m = re.search(r'(\d+)\s*(?:seconds?|s)', low)
-        if m:
-            backoff = max(30, min(300, int(m.group(1))))
-        ctx.rate_limited_until = time.time() + backoff
-        log(ctx, f"⚠ Rate limited — {backoff}s")
-        hub_msg(ctx, "user", f"⚠ {ctx.AGENT_NAME} rate limited ({backoff}s)", "info")
-        hub_post(ctx, "/agents/rate_limited", {"agent_name": ctx.AGENT_NAME,
-                                               "until": ctx.rate_limited_until, "backoff": backoff})
-        # Report to shared rate pool
-        try:
-            hub_post(ctx, "/agents/rate_pool/report", {})
-        except Exception:
-            pass
-        # Report circuit failure for dashboard tracking
-        try:
-            hub_post(ctx, "/agents/tool_event", {
-                "agent_name": ctx.AGENT_NAME,
-                "event": {"type": "circuit_failure", "tool": "claude_api",
-                          "detail": f"Rate limited on {getattr(ctx, 'MODEL_OVERRIDE', '') or 'unknown'}",
-                          "timestamp": time.time()}
-            })
-        except Exception:
-            pass
+    # Direct HTTP 429 status code — always a rate limit
+    if "429" in low and any(pat in low for pat in ["status 429", "http 429", "status_code: 429", "statuscode: 429", "code 429", "error 429"]):
         return True
+    # Check for rate limit indicators only in structured error contexts
+    indicators = ["rate limit", "too many requests", "quota exceeded", "usage limit", "overloaded"]
+    for line in low.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # Only match in lines that look like errors (start with error/warning, or contain error/exception keys)
+        is_error_line = (
+            line.startswith("error") or
+            line.startswith("fatal") or
+            line.startswith("warning") or
+            '"error"' in line or
+            "'error'" in line or
+            '"type":"error"' in line.replace(" ", "") or
+            '"type": "error"' in line or
+            "exception" in line or
+            "traceback" in line or
+            "anthropic" in line  # Anthropic API error messages
+        )
+        if is_error_line and any(i in line for i in indicators):
+            return True
     return False
+
+
+def handle_rl(ctx, stderr, code):
+    if not _is_rate_limit_error(stderr, code):
+        return False
+    low = stderr.lower()
+    backoff = 60
+    m = re.search(r'(\d+)\s*(?:seconds?|s)', low)
+    if m:
+        backoff = max(30, min(300, int(m.group(1))))
+    ctx.rate_limited_until = time.time() + backoff
+    log(ctx, f"⚠ Rate limited — {backoff}s")
+    hub_msg(ctx, "user", f"⚠ {ctx.AGENT_NAME} rate limited ({backoff}s)", "info")
+    hub_post(ctx, "/agents/rate_limited", {"agent_name": ctx.AGENT_NAME,
+                                           "until": ctx.rate_limited_until, "backoff": backoff})
+    # Report to shared rate pool
+    try:
+        hub_post(ctx, "/agents/rate_pool/report", {})
+    except Exception:
+        pass
+    # Report circuit failure for dashboard tracking
+    try:
+        hub_post(ctx, "/agents/tool_event", {
+            "agent_name": ctx.AGENT_NAME,
+            "event": {"type": "circuit_failure", "tool": "claude_api",
+                      "detail": f"Rate limited on {getattr(ctx, 'MODEL_OVERRIDE', '') or 'unknown'}",
+                      "timestamp": time.time()}
+        })
+    except Exception:
+        pass
+    return True
 
 
 def report_usage(ctx, u, model_name=""):
@@ -217,9 +251,26 @@ def report_usage(ctx, u, model_name=""):
 
 # ── Main Call ──
 
+_TASK_RETRY_CAP = 15  # C7: Maximum total retries across all call_claude() invocations per task
+
+
 def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                 continue_session=False, json_schema=None, system_prompt=None):
     effective_cwd = cwd or ctx.AGENT_CWD
+
+    # C7: Global retry budget per task — reset counter when task changes
+    _current_tid = getattr(ctx, 'current_task_id', None)
+    _prev_tid = getattr(ctx, '_task_retry_tracking_id', None)
+    if _current_tid != _prev_tid:
+        ctx._task_retry_total = 0
+        ctx._task_retry_tracking_id = _current_tid
+    if not hasattr(ctx, '_task_retry_total'):
+        ctx._task_retry_total = 0
+    if _current_tid and ctx._task_retry_total >= _TASK_RETRY_CAP:
+        log(ctx, f"✗ Task retry budget exhausted ({ctx._task_retry_total}/{_TASK_RETRY_CAP}) — failing")
+        hub_msg(ctx, "user", f"⚠️ {ctx.AGENT_NAME}: task retry budget exhausted ({ctx._task_retry_total} retries)", "info")
+        return False
+
     # Task-level timeout check
     if ctx._task_start_time and ctx.TASK_TIMEOUT > 0:
         elapsed = time.time() - ctx._task_start_time
@@ -256,6 +307,13 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
     _baseline_tokens = ctx.session_tokens  # safe baseline before any retries
 
     for attempt in range(1, retries + 1):
+        # C7: Increment and check global retry budget on each retry (not the first attempt)
+        if attempt > 1:
+            ctx._task_retry_total += 1
+            if _current_tid and ctx._task_retry_total >= _TASK_RETRY_CAP:
+                log(ctx, f"✗ Task retry budget exhausted ({ctx._task_retry_total}/{_TASK_RETRY_CAP}) — failing")
+                hub_msg(ctx, "user", f"⚠️ {ctx.AGENT_NAME}: task retry budget exhausted ({ctx._task_retry_total} retries)", "info")
+                break
         if _model_failed and "opus" in model:
             model = ctx.MODEL_SONNET
             model_tag = "sonnet"
@@ -405,11 +463,21 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
             t = threading.Thread(target=read_stderr, daemon=True)
             t.start()
 
+            # C1: Wall-clock deadline for this call (default 30 min if no task timeout)
+            _call_timeout = ctx.TASK_TIMEOUT if (ctx._task_start_time and ctx.TASK_TIMEOUT > 0) else 1800
+            _call_deadline = time.time() + _call_timeout
+
+            _json_buffer = ""  # C5: Buffer for incomplete JSON lines
+            _JSON_BUFFER_MAX = 10240  # 10KB max buffer before clearing
             for raw in proc.stdout:
                 with ctx._stop_lock:
                     should_stop = ctx._should_stop
-                if ctx._task_start_time and ctx.TASK_TIMEOUT > 0 and (time.time() - ctx._task_start_time) > ctx.TASK_TIMEOUT:
+                _now = time.time()
+                if ctx._task_start_time and ctx.TASK_TIMEOUT > 0 and (_now - ctx._task_start_time) > ctx.TASK_TIMEOUT:
                     log(ctx, "⏱ Task timeout mid-call — terminating")
+                    should_stop = True
+                elif _now > _call_deadline:
+                    log(ctx, "⏱ Call wall-clock deadline exceeded — terminating")
                     should_stop = True
                 if should_stop:
                     log(ctx, "⛔ Stop signal mid-call")
@@ -423,6 +491,10 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                     return False
 
                 line = raw.decode("utf-8", errors="replace").rstrip()
+                # C5: Prepend any buffered incomplete data from previous read
+                if _json_buffer:
+                    line = _json_buffer + line
+                    _json_buffer = ""
                 try:
                     evt = json.loads(line)
                     if not isinstance(evt, dict):
@@ -527,11 +599,18 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                             # Fallback: use cost_usd directly if usage missing
                             report_progress(ctx, "call_done", f"{tool_count} tools, ${evt.get('cost_usd', 0):.4f}")
                 except json.JSONDecodeError:
+                    # C5: Buffer incomplete JSON lines instead of silently dropping
                     if line.strip():
-                        print(line, flush=True)
-                        with ctx._log_lock:
-                            ctx._log_buf.append(line)
-                        out_lines += 1
+                        if len(line) < _JSON_BUFFER_MAX:
+                            _json_buffer = line  # Try prepending to next line
+                        else:
+                            log(ctx, f"⚠ JSON buffer overflow ({len(line)} bytes) — clearing")
+                            _json_buffer = ""
+                            # Treat as plain output since it's too large to be valid JSON fragment
+                            print(line[:500], flush=True)
+                            with ctx._log_lock:
+                                ctx._log_buf.append(line[:500])
+                            out_lines += 1
                         if any(e in line.lower() for e in ["api error", "unable to connect", "econnreset", "connection reset"]):
                             stderr_lines.append(line)
 
@@ -548,9 +627,18 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                     code = proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     code = -9
-            t.join(timeout=5)
+            t.join(timeout=10)
+            # C3: If stderr thread didn't finish, force-kill proc and close pipe
+            if t.is_alive():
+                log(ctx, "⚠ Stderr reader thread stuck — killing process")
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
             # Fallback: if stderr thread missed data, try direct read
-            if not stderr_lines and proc.stderr:
+            if not stderr_lines and proc.stderr and not proc.stderr.closed:
                 try:
                     leftover = proc.stderr.read()
                     if leftover:
@@ -559,6 +647,12 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                                 stderr_lines.append(_sl.strip())
                 except Exception:
                     pass
+            # C3: Always close stderr pipe to avoid FD leak
+            try:
+                if proc.stderr and not proc.stderr.closed:
+                    proc.stderr.close()
+            except OSError:
+                pass
             log(ctx, f"◼ exit={code}, {out_lines} lines, {tool_count} tools")
 
             if code == 0:
@@ -569,9 +663,20 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                 except Exception:
                     pass
                 break
-            if code in (-15, -9):
-                log(ctx, "⛔ CANCELLED")
+            # C2: Distinguish intentional cancel from OOM/external SIGKILL
+            if code == -15:
+                log(ctx, "⛔ CANCELLED (SIGTERM)")
                 break
+            if code == -9:
+                with ctx._stop_lock:
+                    should_stop = ctx._should_stop
+                if should_stop:
+                    log(ctx, "⛔ CANCELLED (killed)")
+                    break
+                # OOM kill or external SIGKILL — treat as transient, allow retry
+                log(ctx, "⚠ Process killed (SIGKILL) — possible OOM, retrying")
+                stderr_lines.append("Process killed by SIGKILL (possible OOM)")
+                # Fall through to retry logic below
 
             stderr_text = "\n".join(stderr_lines)
             if stderr_lines:
@@ -657,6 +762,13 @@ def call_claude(ctx, prompt, retries=5, force_model=None, cwd=None,
                     proc.kill()
                     proc.wait(timeout=5)
                 except (OSError, subprocess.TimeoutExpired):
+                    pass
+            # RL-2/C3: Close pipes to prevent FD leaks on exception path
+            for pipe in (proc.stdout, proc.stderr):
+                try:
+                    if pipe and not pipe.closed:
+                        pipe.close()
+                except OSError:
                     pass
 
     # Only save session if we have a valid one from the result event

@@ -20,6 +20,7 @@ import subprocess
 import signal
 import re
 import random
+import hashlib
 
 from .context import AgentContext
 from .log_utils import log, start_log_thread, flush_logs
@@ -31,11 +32,12 @@ from .git_ops import (git_rollback, git_branch, git_changed_files, collect_chang
 from .claude_runner import call_claude
 from .verify import verify_loop
 from .chat_handler import start_chat_handler, stop_chat_handler
-from .mcp_manager import setup_mcp, reload_mcp, get_available_mcp, start_mcp_watcher, check_mcp_health
+from .mcp_manager import setup_mcp, reload_mcp, get_available_mcp, start_mcp_watcher, check_mcp_health, check_and_reinit_mcp
 from .learning import (read_file, run_hook, load_template,
                        render_template, extract_learning, get_project_index,
                        get_project_stack, get_smart_hints, load_session,
                        classify_learning_category, _broadcast_ecosystem_update)
+from .credentials import check_expiring_credentials
 from .hub_client import get_relevant_patterns, get_peer_learnings
 
 # ── JSON Schema for structured review verdicts ──
@@ -244,6 +246,116 @@ def _build_patterns_block(patterns, peer_learnings, max_chars=600):
         parts.append("PEER INSIGHTS:\n" + "\n".join(lines))
     block = "\n".join(parts)
     return block[:max_chars] if block else ""
+
+
+# E10 fix: track multiagent.json mtime for hot-reload in the worker
+_multiagent_cfg_mtime = 0
+
+
+def _hot_reload_multiagent_config(ctx):
+    """E10 fix: hot-reload multiagent.json if it changed since last check.
+    Updates relevant runtime settings (model, specialization, etc.) in memory
+    without restarting the agent."""
+    global _multiagent_cfg_mtime
+    cfg_path = os.path.join(ctx.MA_DIR, "multiagent.json")
+    # Also check workspace root
+    ws_cfg_path = os.path.join(ctx.WORKSPACE, "multiagent.json")
+    target_path = ""
+    for p in [ws_cfg_path, cfg_path]:
+        if os.path.exists(p):
+            target_path = p
+            break
+    if not target_path:
+        return
+
+    try:
+        mtime = os.path.getmtime(target_path)
+    except OSError:
+        return
+
+    if mtime <= _multiagent_cfg_mtime:
+        return  # No change
+    _multiagent_cfg_mtime = mtime
+
+    try:
+        with open(target_path) as f:
+            new_cfg = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        log(ctx, f"⚠ Config reload error: {e}")
+        return
+
+    # Update runtime settings from the new config
+    changed = []
+
+    # Model overrides (only if agent doesn't have a per-agent model override)
+    if not ctx.MODEL_OVERRIDE:
+        new_thinking = new_cfg.get("thinking_model", "")
+        if new_thinking and new_thinking != ctx.MODEL_SONNET:
+            ctx.MODEL_SONNET = new_thinking
+            changed.append(f"thinking_model={new_thinking}")
+        new_coding = new_cfg.get("coding_model", "")
+        if new_coding and new_coding != ctx.MODEL_OPUS:
+            ctx.MODEL_OPUS = new_coding
+            changed.append(f"coding_model={new_coding}")
+
+    # Per-agent model from config agents list
+    agents_cfg = new_cfg.get("agents", [])
+    for a in agents_cfg:
+        if isinstance(a, dict) and a.get("name") == ctx.AGENT_NAME:
+            agent_model = a.get("model", "")
+            if agent_model and agent_model != ctx.MODEL_OVERRIDE:
+                ctx.MODEL_OVERRIDE = agent_model
+                changed.append(f"agent_model={agent_model}")
+            break
+
+    # Context limit
+    new_max_ctx = new_cfg.get("max_context")
+    if new_max_ctx is not None:
+        try:
+            new_max_ctx = int(new_max_ctx)
+            new_max_ctx = max(1000, min(200000, new_max_ctx))
+            if new_max_ctx != ctx.MAX_CONTEXT:
+                ctx.MAX_CONTEXT = new_max_ctx
+                changed.append(f"max_context={new_max_ctx}")
+        except (TypeError, ValueError):
+            pass
+
+    # Auto-verify
+    new_verify = new_cfg.get("auto_verify")
+    if new_verify is not None and bool(new_verify) != ctx.AUTO_VERIFY:
+        ctx.AUTO_VERIFY = bool(new_verify)
+        changed.append(f"auto_verify={ctx.AUTO_VERIFY}")
+
+    # Budget limit
+    new_budget = new_cfg.get("budget_limit")
+    if new_budget is not None:
+        try:
+            new_budget = float(new_budget)
+            if new_budget != ctx.BUDGET_LIMIT:
+                ctx.BUDGET_LIMIT = new_budget
+                changed.append(f"budget_limit={new_budget}")
+        except (TypeError, ValueError):
+            pass
+
+    # Task timeout
+    new_timeout = new_cfg.get("task_timeout")
+    if new_timeout is not None:
+        try:
+            new_timeout = int(new_timeout)
+            if new_timeout != ctx.TASK_TIMEOUT:
+                ctx.TASK_TIMEOUT = new_timeout
+                changed.append(f"task_timeout={new_timeout}")
+        except (TypeError, ValueError):
+            pass
+
+    # Model policy
+    new_policy = new_cfg.get("model_policy")
+    if isinstance(new_policy, dict):
+        ctx._model_policy = new_policy
+        changed.append("model_policy")
+
+    if changed:
+        log(ctx, f"🔄 Config reloaded: {', '.join(changed)}")
 
 
 def _refresh_ecosystem(ctx):
@@ -553,6 +665,7 @@ ctx = AgentContext()
 # ── Set agent role from name ──
 _KNOWN_ROLES = {"architect", "frontend", "backend", "qa", "devops", "security", "reviewer",
                  "reviewer-logic", "reviewer-style", "reviewer-arch"}
+_VERIFY_ROLES = {"frontend", "backend", "fullstack", "devops", "security", "qa"}
 ctx.AGENT_ROLE = ctx.AGENT_NAME if ctx.AGENT_NAME in _KNOWN_ROLES else ""
 
 # ── Start log streaming ──
@@ -681,11 +794,23 @@ while True:
 
         poll_resp = hub_post(ctx, f"/poll/{ctx.AGENT_NAME}", {}, timeout=5)
         if not poll_resp:
+            _consecutive_failures += 1
             if is_degraded():
                 log(ctx, "⚠ Hub unreachable, waiting 30s before retry")
                 time.sleep(30)
                 continue
+            # W2: backoff on consecutive hub failures
+            if _consecutive_failures >= 2:
+                _poll_backoff = min(30, 2 ** _consecutive_failures)
+                time.sleep(_poll_backoff)
             continue
+
+        # W1: verify poll response is a dict before accessing .get()
+        if not isinstance(poll_resp, dict):
+            log(ctx, f"⚠ Malformed poll response (expected dict, got {type(poll_resp).__name__}), skipping")
+            continue
+
+        _consecutive_failures = 0  # W2: reset on successful poll
 
         if poll_resp.get("stop"):
             with ctx._stop_lock:
@@ -709,7 +834,7 @@ while True:
             while True:
                 time.sleep(5)
                 resp = hub_post(ctx, f"/poll/{ctx.AGENT_NAME}", {}, timeout=5)
-                if not resp:
+                if not resp or not isinstance(resp, dict):
                     continue
                 if resp.get("resume"):
                     log(ctx, "▶ Resumed by user")
@@ -753,8 +878,19 @@ while True:
                 auto = hub_post(ctx, f"/tasks/auto-assign/{ctx.AGENT_NAME}", {})
                 if auto and auto.get("status") == "ok" and auto.get("task"):
                     _auto_task = auto["task"]
-                    log(ctx, f"📥 Auto-assigned #{_auto_task['id']}: {_auto_task.get('description', '')[:60]}")
-                    ctx.idle_count = 0
+                    # W9: Race condition safety — the hub's /tasks/auto-assign/{name}
+                    # endpoint holds the global state lock while finding AND assigning the
+                    # task (single atomic operation), so two agents polling simultaneously
+                    # cannot claim the same task. This verify step is a defense-in-depth
+                    # check against manual re-assignment that may have occurred between
+                    # the auto-assign response and task processing.
+                    _verify = hub_get(ctx, f"/tasks/{_auto_task['id']}")
+                    if _verify and _verify.get("assigned_to") == ctx.AGENT_NAME:
+                        log(ctx, f"📥 Auto-assigned #{_auto_task['id']}: {_auto_task.get('description', '')[:60]}")
+                        ctx.idle_count = 0
+                    else:
+                        log(ctx, f"⚠ Auto-assign race: task #{_auto_task['id']} was claimed by someone else")
+                        _auto_task = None
             if not _auto_task:
                 continue
 
@@ -782,7 +918,11 @@ while True:
             all_msgs = hub_get(ctx, f"/messages/{ctx.AGENT_NAME}")
             if not all_msgs:
                 continue
-            all_msgs = [m for m in all_msgs if m.get("msg_type") not in ("ack", "heartbeat", "session_reset")]
+            # W1: verify msgs is a list before iterating
+            if not isinstance(all_msgs, list):
+                log(ctx, f"⚠ Malformed messages response (expected list, got {type(all_msgs).__name__}), skipping")
+                continue
+            all_msgs = [m for m in all_msgs if isinstance(m, dict) and m.get("msg_type") not in ("ack", "heartbeat", "session_reset")]
             if not all_msgs:
                 continue
 
@@ -819,9 +959,13 @@ while True:
             continue
 
         # ── Deduplicate messages by content (prevent duplicate system notifications) ──
+        # Never dedup credential messages — retries must go through even if content is identical
         _seen_content = set()
         _deduped = []
         for m in msgs:
+            if m.get("msg_type") == "credential":
+                _deduped.append(m)
+                continue
             _key = (m.get("sender", ""), m.get("content", "")[:500], m.get("msg_type", ""))
             if _key not in _seen_content:
                 _seen_content.add(_key)
@@ -834,7 +978,7 @@ while True:
 
         log(ctx, f"← {len(msgs)} msg(s)")
         for m in msgs:
-            sender = m['sender']
+            sender = m.get('sender', '?')
             content = m.get('content', '')
             if sender == 'user' and len(content) > 40:
                 log(ctx, f"📨 [{sender}] ─────────────────────")
@@ -1017,6 +1161,12 @@ while True:
             update_task_status(ctx, ctx.current_task_id, "in_progress")
         ctx.reset_eco_tracking()
         _refresh_ecosystem(ctx)
+        # E5 fix: re-initialize MCP servers if credentials changed since last task
+        check_and_reinit_mcp(ctx)
+        # E7 fix: check for expiring credentials and log warnings
+        check_expiring_credentials(ctx)
+        # E10 fix: hot-reload multiagent.json if changed
+        _hot_reload_multiagent_config(ctx)
         # Load model policy from config for smart model selection
         try:
             _cfg_data = hub_get(ctx, "/config")
@@ -1114,7 +1264,7 @@ while True:
                 log(ctx, "⚠ No Task ID — working without branch (on current branch)")
 
         set_status(ctx, "working", msgs[0].get("content", "")[:60])
-        mtxt = "\n".join(f"[{m['sender']}] ({m['msg_type']}): {m['content']}" for m in msgs)
+        mtxt = "\n".join(f"[{m.get('sender', '?')}] ({m.get('msg_type', '?')}): {m.get('content', '')}" for m in msgs)
         # Wrap task content to prevent prompt injection
         if is_task:
             mtxt = f"<user_task>\n{mtxt}\n</user_task>"
@@ -1175,12 +1325,12 @@ while True:
             got_creds = False
             while time.time() - cred_wait_start < 300:
                 time.sleep(10)
-                cred_msgs = hub_get(ctx, f"/messages/{ctx.AGENT_NAME}?consume=false")
-                if cred_msgs:
+                # Consume atomically — avoids race where another thread
+                # could consume between a peek and a separate consume call
+                cred_msgs = hub_get(ctx, f"/messages/{ctx.AGENT_NAME}")
+                if cred_msgs and isinstance(cred_msgs, list):
                     for cm in cred_msgs:
                         if cm.get("msg_type") == "credential":
-                            # Consume the credential message so it's not re-processed
-                            hub_get(ctx, f"/messages/{ctx.AGENT_NAME}")
                             reload_mcp(ctx)
                             got_creds = True
                             break
@@ -1339,16 +1489,30 @@ CRITICAL: When you see a URL from a known MCP domain (figma.com, github.com, sen
                     prefetched_content += f"\nEXTERNAL_ID: {_ext_id}"
             eco_hints = get_smart_hints(task_text, ctx.current_project, ctx.MA_DIR, ctx.HUB_URL, role="architect")
             ctx._active_pattern_ids = []
+            ctx._active_pattern_texts = {}
         else:
             # Dev agents: full context
+            # Check file locks — wait briefly if locks are held, then warn
             try:
                 locks = hub_get(ctx, "/files/locks")
                 if locks and isinstance(locks, dict):
                     other_locks = {path: info["agent"] for path, info in locks.items()
                                    if info.get("agent") != ctx.AGENT_NAME}
                     if other_locks:
-                        lock_list = "\n".join(f"  - {path} (locked by {agent})" for path, agent in other_locks.items())
-                        lock_ctx = f"\n⚠️ LOCKED FILES — DO NOT EDIT these files, they are being worked on by other agents:\n{lock_list}\nIf you need to modify a locked file, message the agent who locked it first."
+                        # Wait up to 5s for locks to clear (poll every 0.5s)
+                        _lock_wait_start = time.time()
+                        while other_locks and (time.time() - _lock_wait_start) < 5:
+                            time.sleep(0.5)
+                            locks = hub_get(ctx, "/files/locks")
+                            if locks and isinstance(locks, dict):
+                                other_locks = {path: info["agent"] for path, info in locks.items()
+                                               if info.get("agent") != ctx.AGENT_NAME}
+                            else:
+                                other_locks = {}
+                        if other_locks:
+                            lock_list = "\n".join(f"  - {path} (locked by {agent})" for path, agent in other_locks.items())
+                            lock_ctx = f"\n⚠️ LOCKED FILES — DO NOT EDIT these files, they are being worked on by other agents:\n{lock_list}\nIf you need to modify a locked file, message the agent who locked it first.\n⚠️ CONFLICT RISK: These locks were still held after waiting. Be extra careful — coordinate with the locking agent before touching these paths."
+                            log(ctx, f"⚠ File locks still held after 5s wait: {', '.join(other_locks.keys())}")
             except Exception:
                 pass
 
@@ -1399,6 +1563,7 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
                 peer_learnings = get_peer_learnings(ctx, top=3)
                 learned_patterns_ctx = _build_patterns_block(patterns, peer_learnings)
                 ctx._active_pattern_ids = [p["id"] for p in (patterns or [])[:3]]
+                ctx._active_pattern_texts = {p["id"]: p.get("pattern", "") for p in (patterns or [])[:3]}
                 # Cross-agent memory: load shared codebase learnings
                 _shared_mem_file = os.path.join(ctx.MA_DIR, "memory", "learnings", f"{ctx.current_project or 'general'}.md")
                 if os.path.exists(_shared_mem_file):
@@ -1410,6 +1575,7 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
                         pass
             except Exception:
                 ctx._active_pattern_ids = []
+                ctx._active_pattern_texts = {}
 
             # Discover project ecosystem (MCP, commands, hooks, configs)
             if ctx.current_project:
@@ -1632,13 +1798,44 @@ RULES:
         task_ok = True
         if _agent_gave_up:
             task_ok = False
-        elif is_task and ctx.current_project and not _is_architect:
-            vr = verify_loop(ctx, ctx.current_project, call_claude_fn=lambda *a, **kw: call_claude(ctx, *a, **kw))
+        elif is_task and ctx.current_project and (ctx.AGENT_ROLE in _VERIFY_ROLES or ctx.AGENT_NAME.split("-")[0] in _VERIFY_ROLES):
+            # ── Tree fingerprint cache: skip verify if code hasn't changed ──
+            _tree_fp = ""
+            try:
+                _pdir = os.path.join(ctx.WORKSPACE, ctx.current_project)
+                _, _head = git(ctx, ["rev-parse", "HEAD"], _pdir)
+                _, _dr = git(ctx, ["diff", "--raw", "HEAD"], _pdir)
+                _, _cr = git(ctx, ["diff", "--cached", "--raw"], _pdir)
+                _, _ut = git(ctx, ["ls-files", "--others", "--exclude-standard"], _pdir)
+                _tree_fp = hashlib.sha256(f"{(_head or '').strip()}\n{_dr}\n{_cr}\n{_ut}".encode()).hexdigest()[:16]
+            except Exception:
+                pass
+
+            _skip_cached = False
+            if _tree_fp and ctx.current_task_id:
+                try:
+                    _td = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
+                    if _td and isinstance(_td, dict) and _td.get("_verified_tree_hash") == _tree_fp:
+                        log(ctx, f"⏭ skip verify — tree {_tree_fp} matches last verified state")
+                        _skip_cached = True
+                except Exception:
+                    pass
+
+            if _skip_cached:
+                vr = True
+            else:
+                vr = verify_loop(ctx, ctx.current_project, call_claude_fn=lambda *a, **kw: call_claude(ctx, *a, **kw))
             if not vr:
                 task_ok = False
                 log(ctx, f"⚠ verify failed on {ctx.current_project} — changes preserved (use Retry to reattempt)")
                 hub_msg(ctx, "user", f"⚠️ {ctx.AGENT_NAME}: task on {ctx.current_project} finished but verify failed. Changes are preserved — you can Retry the task or manually review.", "info")
             else:
+                # Store tree fingerprint so subsequent runs can skip verify
+                if _tree_fp and ctx.current_task_id:
+                    try:
+                        hub_post(ctx, f"/tasks/{ctx.current_task_id}", {"_verified_tree_hash": _tree_fp})
+                    except Exception:
+                        pass
                 # Collect changes for review panel — do NOT stage/commit (files stay locked)
                 proj_dir = os.path.join(ctx.WORKSPACE, ctx.current_project)
                 git_changed_files(ctx, ctx.current_project)
@@ -1758,16 +1955,18 @@ RULES:
             else:
                 # Dev agents go to code_review, architect goes to done
                 _SKIP_REVIEW_ROLES = {"architect"}
-                # Check skip_review flag from task
+                # Check skip_review and _is_check_task flags from task
                 _task_skip_review = False
+                _is_check_task = False
                 if ctx.current_task_id:
                     try:
                         _task_data = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
                         if _task_data and isinstance(_task_data, dict):
                             _task_skip_review = _task_data.get("skip_review", False)
+                            _is_check_task = _task_data.get("_is_check_task", False)
                     except Exception:
                         pass
-                if task_ok and ctx.AGENT_NAME not in _SKIP_REVIEW_ROLES and not _task_skip_review:
+                if task_ok and ctx.AGENT_NAME not in _SKIP_REVIEW_ROLES and not _task_skip_review and not _is_check_task:
                     _final_status = "code_review"
                     _skip_unlock = True
                 else:
@@ -1797,6 +1996,8 @@ RULES:
                 "task_type": ctx.current_project or "general", "success": task_ok,
                 "classified_type": _task_type})
 
+        # Save output lines for pattern voting before clearing
+        _saved_output_lines = list(ctx._last_output_lines[-20:])
         ctx._last_output_lines = []
 
         if not _skip_unlock:
@@ -1807,14 +2008,34 @@ RULES:
 
         # Post-task voting on patterns
         if is_task and hasattr(ctx, '_active_pattern_ids') and ctx._active_pattern_ids:
-            vote_val = 1 if task_ok else -1
-            for pid in ctx._active_pattern_ids[:3]:
-                try:
-                    hub_post(ctx, f"/patterns/{pid}/vote",
-                             {"agent_name": ctx.AGENT_NAME, "vote": vote_val})
-                except Exception:
-                    pass
+            _pattern_texts = getattr(ctx, '_active_pattern_texts', {})
+            if task_ok:
+                # Success: upvote all active patterns
+                for pid in ctx._active_pattern_ids[:3]:
+                    try:
+                        hub_post(ctx, f"/patterns/{pid}/vote",
+                                 {"agent_name": ctx.AGENT_NAME, "vote": 1})
+                    except Exception:
+                        pass
+            else:
+                # Failure: only penalize patterns whose text appears in error output.
+                # If no pattern can be linked to the failure, skip negative votes entirely.
+                _error_text = (fail_reason + " " + " ".join(_saved_output_lines)).lower()
+                for pid in ctx._active_pattern_ids[:3]:
+                    _ptxt = _pattern_texts.get(pid, "").lower()
+                    if not _ptxt:
+                        continue
+                    # Check if any significant word (4+ chars) from pattern appears in error output
+                    _pwords = [w for w in re.split(r'[\s/\-_.,:;]+', _ptxt) if len(w) >= 4]
+                    _related = any(w in _error_text for w in _pwords)
+                    if _related:
+                        try:
+                            hub_post(ctx, f"/patterns/{pid}/vote",
+                                     {"agent_name": ctx.AGENT_NAME, "vote": -1})
+                        except Exception:
+                            pass
             ctx._active_pattern_ids = []
+            ctx._active_pattern_texts = {}
 
         if is_task and task_ok and msgs:
             try:
@@ -1834,17 +2055,18 @@ RULES:
                 "claude_calls": ctx.claude_calls,
             })
 
-        # Track consecutive failures for backoff
+        # W2: Track consecutive failures with exponential backoff
         if is_task:
             if task_ok:
                 _consecutive_failures = 0
             else:
                 _consecutive_failures += 1
-                if _consecutive_failures >= 3:
-                    _fail_backoff = min(120, 10 * 2 ** (_consecutive_failures - 3))
-                    log(ctx, f"⚠ {_consecutive_failures} consecutive failures — backing off {_fail_backoff}s")
-                    time.sleep(_fail_backoff)
+                _fail_backoff = min(30, 2 ** _consecutive_failures)
+                log(ctx, f"⚠ {_consecutive_failures} consecutive task failure(s) — backing off {_fail_backoff}s")
+                time.sleep(_fail_backoff)
 
+        # W10: Ensure chat handler is stopped before going idle (safety net)
+        stop_chat_handler(ctx)
         # Send final progress with correct token count before going idle
         report_progress(ctx, "task_done", f"{ctx.session_tokens:,} tok, {ctx.claude_calls} calls")
         set_status(ctx, "idle")
@@ -1887,6 +2109,14 @@ RULES:
         break
     except ConnectionError as e:
         stop_chat_handler(ctx)
+        # W10: Kill any running Claude subprocess on connection error
+        if ctx.current_proc:
+            try:
+                ctx.current_proc.terminate()
+            except OSError:
+                pass
+            ctx.current_proc = None
+        _consecutive_failures += 1
         log(ctx, f"CONNECTION ERROR: {e} — will retry hub connection")
         if ctx.current_task_id:
             # Auto-retry logic
@@ -1902,10 +2132,20 @@ RULES:
                     pass
             else:
                 update_task_status(ctx, ctx.current_task_id, "failed", detail=f"Connection lost: {str(e)[:200]}")
-        time.sleep(5)
+        # W2: exponential backoff on connection errors
+        _conn_backoff = min(30, 2 ** _consecutive_failures)
+        time.sleep(_conn_backoff)
         continue
     except TimeoutError as e:
         stop_chat_handler(ctx)
+        # W10: Kill any running Claude subprocess on timeout
+        if ctx.current_proc:
+            try:
+                ctx.current_proc.terminate()
+            except OSError:
+                pass
+            ctx.current_proc = None
+        _consecutive_failures += 1
         log(ctx, f"TIMEOUT ERROR: {e}")
         if ctx.current_task_id:
             # Auto-retry logic
@@ -1926,14 +2166,25 @@ RULES:
         set_status(ctx, "idle")
         ctx.current_task_id = None
         ctx._task_start_time = 0
-        time.sleep(3)
+        # W2: exponential backoff on timeout errors
+        _timeout_backoff = min(30, 2 ** _consecutive_failures)
+        time.sleep(_timeout_backoff)
         continue
     except json.JSONDecodeError as e:
+        stop_chat_handler(ctx)  # W10: ensure chat thread is cleaned up
         log(ctx, f"JSON ERROR: {e} — skipping malformed data")
         time.sleep(1)
         continue
     except Exception as e:
         stop_chat_handler(ctx)
+        # W10: Kill any running Claude subprocess on unhandled exception
+        if ctx.current_proc:
+            try:
+                ctx.current_proc.terminate()
+            except OSError:
+                pass
+            ctx.current_proc = None
+        _consecutive_failures += 1
         import traceback
         tb = traceback.format_exc()
         log(ctx, f"LOOP ERROR: {e}\n{tb[-500:]}")
@@ -1964,5 +2215,6 @@ RULES:
         set_status(ctx, "idle")
         ctx.current_task_id = None
         ctx._task_start_time = 0
-        # Brief pause before next loop iteration to avoid crash loops
-        time.sleep(3)
+        # W2: exponential backoff on crash to avoid crash loops
+        _crash_backoff = min(30, 2 ** _consecutive_failures)
+        time.sleep(_crash_backoff)

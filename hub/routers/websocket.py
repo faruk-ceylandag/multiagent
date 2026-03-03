@@ -101,7 +101,9 @@ async def websocket_endpoint(ws: WebSocket):
                 else:
                     try:
                         cmd = json.loads(msg)
-                        if cmd.get("type") == "follow":
+                        if cmd.get("type") == "ping":
+                            await ws.send_text(json.dumps({"type": "pong"}))
+                        elif cmd.get("type") == "follow":
                             follow_agent = cmd.get("agent", "")
                             log_cursors.clear()
                             if follow_agent:

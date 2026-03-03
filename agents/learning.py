@@ -177,23 +177,86 @@ def render_template(tpl, **kw):
 
 # ── Pattern Classification ──
 _CATEGORY_KEYWORDS = {
-    "playwright": ["playwright", "e2e", "browser", "selector", "locator", "getbytestid"],
-    "figma": ["figma", "design token", "figma-to", "design system", "mcp__figma"],
-    "vue": ["vue", "nuxt", "composable", "ref(", "computed", "v-model", "pinia"],
-    "react": ["react", "nextjs", "next.js", "useState", "useEffect", "jsx", "tsx"],
-    "testing": ["test", "jest", "vitest", "assert", "mock", "fixture", "coverage"],
-    "i18n": ["i18n", "translation", "trans(", "locale", "gettext", "intl"],
-    "routing": ["router", "route", "middleware", "endpoint", "url pattern"],
-    "mcp": ["mcp", "mcp__", "mcp server", "tool_use"],
-    "backend": ["api", "controller", "migration", "model", "database", "query", "sql"],
-    "database": ["postgres", "mysql", "redis", "mongo", "prisma", "orm", "schema"],
-    "devops": ["docker", "ci/cd", "pipeline", "deploy", "k8s", "kubernetes", "nginx"],
-    "security": ["auth", "token", "csrf", "xss", "injection", "permission", "rbac"],
+    "playwright": ["playwright", "e2e", "browser", "selector", "locator", "getbytestid",
+                    "headless", "chromium", "webkit", "page.goto", "page.click", "puppeteer"],
+    "figma": ["figma", "design token", "figma-to", "design system", "mcp__figma",
+              "figma.com", "design spec", "prototype", "component library", "style guide"],
+    "vue": ["vue", "nuxt", "composable", "ref(", "computed", "v-model", "pinia",
+            "vuex", "vue-router", "defineComponent", "setup()", "onMounted", "<template>",
+            "v-if", "v-for", "v-bind", "v-on", ".vue"],
+    "react": ["react", "nextjs", "next.js", "useState", "useEffect", "jsx", "tsx",
+              "useCallback", "useMemo", "useRef", "useContext", "redux", "zustand",
+              "react-query", "react-router", "component", "props"],
+    "testing": ["test", "jest", "vitest", "assert", "mock", "fixture", "coverage",
+                "describe(", "it(", "expect(", "beforeEach", "afterEach", "spy",
+                "stub", "snapshot", "unit test", "integration test", "spec"],
+    "i18n": ["i18n", "translation", "trans(", "locale", "gettext", "intl",
+             "localization", "l10n", "language", "rtl", "pluralization", "formatMessage"],
+    "routing": ["router", "route", "middleware", "endpoint", "url pattern",
+                "path(", "get(", "post(", "put(", "delete(", "request handler",
+                "http handler", "api route", "pages/api"],
+    "mcp": ["mcp", "mcp__", "mcp server", "tool_use", "model context protocol",
+            "mcp.json", "stdio", "jsonrpc"],
+    "backend": ["api", "controller", "migration", "model", "database", "query", "sql",
+                "rest api", "graphql", "grpc", "microservice", "server-side",
+                "request", "response", "handler", "service layer"],
+    "database": ["postgres", "mysql", "redis", "mongo", "prisma", "orm", "schema",
+                 "sqlite", "supabase", "sequelize", "typeorm", "knex", "drizzle",
+                 "table", "index", "foreign key", "join", "transaction"],
+    "devops": ["docker", "ci/cd", "pipeline", "deploy", "k8s", "kubernetes", "nginx",
+               "terraform", "ansible", "helm", "github actions", "gitlab ci",
+               "dockerfile", "compose", "registry", "artifact"],
+    "security": ["auth", "token", "csrf", "xss", "injection", "permission", "rbac",
+                 "oauth", "jwt", "cors", "encryption", "hash", "certificate",
+                 "vulnerability", "sanitize", "escape", "access control"],
+    "python": ["python", "pip", "venv", "django", "flask", "fastapi", "pytest",
+               "pydantic", "asyncio", "decorator", "type hint", "dataclass"],
+    "frontend": ["css", "scss", "sass", "tailwind", "styled-components", "html",
+                 "responsive", "flexbox", "grid", "animation", "svg", "canvas",
+                 "layout", "theme", "dark mode", "accessibility", "a11y"],
+    "mobile": ["react native", "flutter", "ios", "android", "swift", "kotlin",
+               "expo", "capacitor", "cordova", "mobile app"],
+}
+
+# E8 fix: file extension → category fallback mapping
+_EXT_CATEGORY_MAP = {
+    ".py": "python",
+    ".pyw": "python",
+    ".js": "frontend",
+    ".jsx": "react",
+    ".ts": "frontend",
+    ".tsx": "react",
+    ".vue": "vue",
+    ".svelte": "frontend",
+    ".css": "frontend",
+    ".scss": "frontend",
+    ".sass": "frontend",
+    ".html": "frontend",
+    ".sql": "database",
+    ".prisma": "database",
+    ".go": "backend",
+    ".rs": "backend",
+    ".java": "backend",
+    ".rb": "backend",
+    ".php": "backend",
+    ".swift": "mobile",
+    ".kt": "mobile",
+    ".dart": "mobile",
+    ".yml": "devops",
+    ".yaml": "devops",
+    ".tf": "devops",
+    ".dockerfile": "devops",
+    ".test.js": "testing",
+    ".test.ts": "testing",
+    ".spec.js": "testing",
+    ".spec.ts": "testing",
+    ".test.py": "testing",
 }
 
 
 def classify_learning_category(text):
-    """Classify text into a pattern category by keyword match count."""
+    """Classify text into a pattern category by keyword match count.
+    E8 fix: expanded keywords, file-extension fallback, defaults to 'general'."""
     if not text:
         return "general"
     low = text.lower()
@@ -202,9 +265,22 @@ def classify_learning_category(text):
         score = sum(1 for kw in keywords if kw in low)
         if score > 0:
             scores[cat] = score
-    if not scores:
-        return "general"
-    return max(scores, key=scores.get)
+
+    if scores:
+        return max(scores, key=scores.get)
+
+    # E8 fallback: classify by file extensions mentioned in the text
+    import re
+    extensions_found = re.findall(r'\.\w{1,10}', low)
+    ext_scores = {}
+    for ext in extensions_found:
+        cat = _EXT_CATEGORY_MAP.get(ext)
+        if cat:
+            ext_scores[cat] = ext_scores.get(cat, 0) + 1
+    if ext_scores:
+        return max(ext_scores, key=ext_scores.get)
+
+    return "general"
 
 
 def get_project_index(ctx):

@@ -46,15 +46,3 @@ Agents are Claude CLI workers. `worker.py` is the main loop — boot, poll hub, 
 ## Broadcasting
 
 Use `_broadcast_ecosystem_update(ctx, subtype, data)` from learning.py. Subtypes: `pattern_discovered`, `tool_effective`, `new_mcp_found`.
-
-## Known Gaps
-
-When modifying agent code, be aware of these documented issues (see GRAPH.md for full details):
-
-**Worker (worker.py)** — W1: malformed poll response crash, W2: no backoff on hub failure, W3: no task-level timeout (Claude hang → stuck task), W4: hub_post null not validated before `.get()`, W5: session map never evicted, W6-W7: credential dedup/peek-consume not atomic, W8: cooperative-only file locks, W9: auto-assign race, W10: chat thread not killed on timeout, W11: pattern voting penalizes unrelated failures.
-
-**Claude Runner (claude_runner.py)** — C1: timeout only on proc.wait, C2: OOM kill treated as cancel, C3: stderr thread FD leak, C4: unbounded stderr_lines, C5: silent drop of incomplete JSON, C6: rate limit false positives, C7: no global retry budget per task.
-
-**Git Ops (git_ops.py)** — G1: stash pop `checkout --theirs` doesn't resolve all conflicts, G2: 15s timeout not caught as TimeoutExpired, G3: rollback returns True on stash pop failure, G4: branch name truncation can create invalid names.
-
-**Verify (verify.py)** — V1: loops until max_cycles if result file never written, V2: no check if project has test/lint commands, V3: max_cycles=1 for single-file changes (no retry).
