@@ -1702,12 +1702,13 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
 
 RULES:
 1. Execute ALL steps yourself, in order. Do NOT delegate to other agents.
-2. Do NOT create a plan_proposal. Do NOT use curl to post plans.
-3. Use MCP tools (Atlassian, Google, Figma, etc.) as instructed in each step.
-4. After completing each step, report progress to user via:
+2. Do NOT create a plan_proposal. Do NOT use curl to post plans or send tasks.
+3. FORBIDDEN tools: agent-send, Skill(agent-send), ToolSearch. Do NOT message other agents. Do NOT use curl to post to /messages with receiver other than "user".
+4. Use MCP tools (Atlassian, Google, Figma, etc.) as instructed in each step.
+5. After completing each step, report progress to user via:
    curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{"sender":"{{agent}}","receiver":"user","content":"<status message>","msg_type":"info"}'
-5. If a step fails, report the error and continue with the next step.
-6. NEVER ask questions. NEVER ask for confirmation. Execute and report.
+6. If a step fails, report the error and continue with the next step.
+7. NEVER ask questions. NEVER ask for confirmation. Execute and report.
 {{branch_info}}{{hints}}""")
         # ── Architect gets a lean, fast-delegation prompt ──
         elif ctx.AGENT_NAME == "architect" and not _is_skill:
