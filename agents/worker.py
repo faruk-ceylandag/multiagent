@@ -1367,7 +1367,9 @@ while True:
 
         # Skill resolution: expand /skill_name invocations with SKILL.md content
         _resolved_text, _skill_name = _resolve_skill(ctx, task_text)
+        _is_skill = False
         if _skill_name:
+            _is_skill = True
             # Replace message content with resolved skill instructions
             task_text = _resolved_text
             # Update msgs so the template gets the expanded content
@@ -1677,7 +1679,7 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
         role_ctx = f"\nROLE: {role.strip()}" if role and role.strip() else ""
 
         # ── Architect gets a lean, fast-delegation prompt ──
-        if ctx.AGENT_NAME == "architect":
+        if ctx.AGENT_NAME == "architect" and not _is_skill:
             task_tpl = load_template(ctx, "task_architect", """You are {{agent}} — the team coordinator.{{role_ctx}}
 === TASK ===
 {{messages}}
@@ -1710,6 +1712,26 @@ RULES:
 5. Use EXTERNAL_ID from pre-fetched content in EVERY step's task_external_id. No ID? Leave empty.
 6. ALWAYS add a QA step (depends_on dev step) for verification.
 7. NEVER ask questions, NEVER explore. Execute the curl and STOP.
+{{branch_info}}{{hints}}""")
+        elif ctx.AGENT_NAME == "architect" and _is_skill:
+            # Skill mode: the skill's SKILL.md provides its own instructions and curl format.
+            # Do NOT apply the architect's "max 2-3 steps" constraint — skills define their own step count.
+            task_tpl = load_template(ctx, "task_skill", """You are {{agent}} executing a skill.
+
+{{project_ctx}}
+{{prefetched}}
+{{contracts}}
+{{roster}}
+
+=== SKILL INSTRUCTIONS ===
+{{messages}}
+
+RULES:
+- Follow the skill instructions above EXACTLY. They define the output format, step count, and curl structure.
+- The skill may produce many plan steps — that is expected. Do NOT limit steps to 2-3.
+- Use MCP tools as instructed by the skill (Atlassian, Google, Figma, etc.).
+- Copy ALL context into step descriptions — agents receiving steps have ZERO other context.
+- NEVER ask questions. Execute the instructions and STOP.
 {{branch_info}}{{hints}}""")
         else:
             task_tpl = load_template(ctx, "task", """You are {{agent}}.{{role_ctx}}
