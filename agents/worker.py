@@ -1210,6 +1210,15 @@ while True:
                     ctx.current_task_id = str(result["id"])
                     log(ctx, f"📌 Task #{ctx.current_task_id} created in kanban")
 
+        # Early self-execute detection (before branch/project setup)
+        _is_self_execute = False
+        if ctx.AGENT_NAME == "architect" and ctx.current_task_id:
+            try:
+                _se_task = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
+                _is_self_execute = bool(_se_task and isinstance(_se_task, dict) and _se_task.get("_self_execute"))
+            except Exception:
+                pass
+
         # All agents set their own task to in_progress (reviewers/QA set their subtask, devs set main task)
         if ctx.current_task_id:
             update_task_status(ctx, ctx.current_task_id, "in_progress")
@@ -1229,33 +1238,35 @@ while True:
         except Exception:
             pass
 
-        for m in msgs:
-            c = m.get("content", "").lower()
-            if m.get("project"):
-                ctx.current_project = m["project"]
-                break
-            tid = m.get("task_id", "")
-            if tid and str(tid).isdigit():
-                task_data = hub_get(ctx, f"/tasks/{tid}")
-                if task_data and isinstance(task_data, dict) and task_data.get("project"):
-                    ctx.current_project = task_data["project"]
+        # Self-execute tasks are MCP-only (no local repo needed) — skip project/branch setup
+        if not _is_self_execute:
+            for m in msgs:
+                c = m.get("content", "").lower()
+                if m.get("project"):
+                    ctx.current_project = m["project"]
                     break
-            if not ctx.current_project:
-                ctx.current_project = _smart_project_detect(ctx, c)
-            if ctx.current_project:
-                break
+                tid = m.get("task_id", "")
+                if tid and str(tid).isdigit():
+                    task_data = hub_get(ctx, f"/tasks/{tid}")
+                    if task_data and isinstance(task_data, dict) and task_data.get("project"):
+                        ctx.current_project = task_data["project"]
+                        break
+                if not ctx.current_project:
+                    ctx.current_project = _smart_project_detect(ctx, c)
+                if ctx.current_project:
+                    break
 
         if is_task:
             run_hook(ctx, "pre-task", {"project": ctx.current_project or ""})
 
-        if ctx.current_task_id and ctx.current_project:
+        if not _is_self_execute and ctx.current_task_id and ctx.current_project:
             hub_post(ctx, f"/tasks/{ctx.current_task_id}", {"project": ctx.current_project})
 
-        # ── Branch management ──
+        # ── Branch management (skip for self-execute: no local repo needed) ──
         branch_info = ""
         current_branch = None
         task_external_id = None
-        if is_task and ctx.current_project:
+        if is_task and ctx.current_project and not _is_self_execute:
             for m in msgs:
                 eid = m.get("task_external_id", "")
                 if eid and not re.match(r'^(feature/)?TASK-\d+$', eid):
@@ -1328,13 +1339,6 @@ while True:
         # Architects get full roster (roles/expertise/status) for routing decisions
         # Dev agents get minimal roster (just names) — they rarely need team details
         _is_architect = ctx.AGENT_NAME == "architect"
-        _is_self_execute = False
-        if _is_architect and ctx.current_task_id:
-            try:
-                _se_task = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
-                _is_self_execute = bool(_se_task and isinstance(_se_task, dict) and _se_task.get("_self_execute"))
-            except Exception:
-                pass
         if _is_architect:
             roster = get_agent_roster(ctx)
         else:
