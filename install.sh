@@ -27,7 +27,7 @@ else
 fi
 echo -e "${G}✓ Source: $SRC${NC}"
 
-for d in hub/routers hub/middleware hub/dashboard agents lib ecosystem/mcp ecosystem/hooks ecosystem/templates ecosystem/subagents ecosystem/commands; do mkdir -p "$INSTALL_DIR/$d"; done
+for d in hub/routers hub/middleware hub/dashboard agents lib ecosystem/mcp ecosystem/hooks ecosystem/templates ecosystem/subagents ecosystem/commands ecosystem/skills; do mkdir -p "$INSTALL_DIR/$d"; done
 
 cp "$SRC/start.py" "$INSTALL_DIR/"
 
@@ -52,6 +52,16 @@ cp "$SRC/ecosystem/hooks/"*.py "$INSTALL_DIR/ecosystem/hooks/" 2>/dev/null || tr
 cp "$SRC/ecosystem/templates/"*.py "$INSTALL_DIR/ecosystem/templates/" 2>/dev/null || true
 cp "$SRC/ecosystem/subagents/"*.md "$INSTALL_DIR/ecosystem/subagents/" 2>/dev/null || true
 cp "$SRC/ecosystem/commands/"*.md "$INSTALL_DIR/ecosystem/commands/" 2>/dev/null || true
+
+# Skills (directory-based: each skill is a subdirectory with SKILL.md)
+if [ -d "$SRC/ecosystem/skills" ]; then
+  for skill_dir in "$SRC/ecosystem/skills"/*/; do
+    skill_name=$(basename "$skill_dir")
+    mkdir -p "$INSTALL_DIR/ecosystem/skills/$skill_name"
+    cp "$skill_dir"* "$INSTALL_DIR/ecosystem/skills/$skill_name/" 2>/dev/null || true
+  done
+fi
+
 for d in ecosystem ecosystem/mcp ecosystem/hooks ecosystem/templates; do
   touch "$INSTALL_DIR/$d/__init__.py"
 done
@@ -243,6 +253,67 @@ except: print('  Hub not running')
     sleep 2
     exec "$0" daemon "${2:-.}"
     ;;
+  link)
+    _TARGET="${2:-.}"
+    _TARGET="$(cd "$_TARGET" 2>/dev/null && pwd || echo "$_TARGET")"
+    _CLAUDE_DIR="$_TARGET/.claude"
+    mkdir -p "$_CLAUDE_DIR/agents" "$_CLAUDE_DIR/commands" "$_CLAUDE_DIR/skills"
+    _LINKED=0
+    # Subagents → .claude/agents/
+    for f in "$INSTALL_DIR/ecosystem/subagents/"*.md; do
+      [ -f "$f" ] || continue
+      _NAME=$(basename "$f")
+      _DST="$_CLAUDE_DIR/agents/$_NAME"
+      [ -L "$_DST" ] && continue  # already linked
+      [ -f "$_DST" ] && continue  # project has its own
+      ln -s "$f" "$_DST"
+      _LINKED=$((_LINKED+1))
+    done
+    # Commands → .claude/commands/
+    for f in "$INSTALL_DIR/ecosystem/commands/"*.md; do
+      [ -f "$f" ] || continue
+      _NAME=$(basename "$f")
+      _DST="$_CLAUDE_DIR/commands/$_NAME"
+      [ -L "$_DST" ] && continue
+      [ -f "$_DST" ] && continue
+      ln -s "$f" "$_DST"
+      _LINKED=$((_LINKED+1))
+    done
+    # Skills → .claude/skills/
+    for d in "$INSTALL_DIR/ecosystem/skills"/*/; do
+      [ -d "$d" ] || continue
+      _NAME=$(basename "$d")
+      _DST="$_CLAUDE_DIR/skills/$_NAME"
+      [ -L "$_DST" ] && continue
+      [ -d "$_DST" ] && continue
+      ln -s "$d" "$_DST"
+      _LINKED=$((_LINKED+1))
+    done
+    echo "  ✓ Linked $_LINKED ecosystem tools to $_CLAUDE_DIR"
+    echo "    agents:   $(ls "$_CLAUDE_DIR/agents/"*.md 2>/dev/null | wc -l | tr -d ' ') subagents"
+    echo "    commands: $(ls "$_CLAUDE_DIR/commands/"*.md 2>/dev/null | wc -l | tr -d ' ') commands"
+    echo "    skills:   $(ls -d "$_CLAUDE_DIR/skills/"*/ 2>/dev/null | wc -l | tr -d ' ') skills"
+    ;;
+  unlink)
+    _TARGET="${2:-.}"
+    _TARGET="$(cd "$_TARGET" 2>/dev/null && pwd || echo "$_TARGET")"
+    _CLAUDE_DIR="$_TARGET/.claude"
+    _REMOVED=0
+    # Remove only symlinks pointing to our install dir
+    for subdir in agents commands skills; do
+      _DIR="$_CLAUDE_DIR/$subdir"
+      [ -d "$_DIR" ] || continue
+      for item in "$_DIR"/*; do
+        [ -L "$item" ] || continue
+        _LINK_TARGET=$(readlink "$item")
+        if echo "$_LINK_TARGET" | grep -q "$INSTALL_DIR"; then
+          rm "$item"
+          _REMOVED=$((_REMOVED+1))
+        fi
+      done
+    done
+    echo "  ✓ Removed $_REMOVED ecosystem symlinks from $_CLAUDE_DIR"
+    ;;
   help|--help|-h)
     echo "Multi-Agent CLI"
     echo ""
@@ -262,6 +333,8 @@ except: print('  Hub not running')
     echo "  remove <ws_id>     Remove workspace from hub"
     echo "  export             Export session report"
     echo "  kill               Stop everything"
+    echo "  link [path]        Link ecosystem tools to project's .claude/"
+    echo "  unlink [path]      Remove ecosystem symlinks from project"
     echo "  daemon [path]      Start as background daemon"
     echo "  stop-daemon        Stop running daemon"
     echo "  restart-daemon     Restart daemon"
@@ -274,6 +347,9 @@ except: print('  Hub not running')
     echo "  ma tail qa                   # follow QA logs"
     echo "  ma add ~/other-repo myrepo   # add workspace"
     echo "  ma ws                        # list workspaces"
+    echo "  ma link                      # link ecosystem to current project"
+    echo "  ma link ~/other-project      # link ecosystem to another project"
+    echo "  ma unlink                    # remove ecosystem links"
     echo "  ma daemon                    # start as daemon"
     echo "  ma stop-daemon               # stop the daemon"
     ;;

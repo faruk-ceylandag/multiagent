@@ -243,6 +243,7 @@ function _applyDashboardData(d) {
   _lastTaskHash = taskHash;
   if (d.version) _lastVersion = d.version;
   data = d;
+  _syncSkillCommands(d.skills);
   if (!data._config) fetchConfig();
   // Always render workspace bar (show primary + add button even when empty)
   renderWorkspaceBar(d.workspaces || {});
@@ -2451,7 +2452,7 @@ function _updateSlashHint(text) {
 
   const partial = text.split(/\s/)[0].toLowerCase();
   const matches = Object.entries(_slashCommands).filter(([k]) => k.startsWith(partial));
-  if (!matches.length || (matches.length === 1 && matches[0][0] === partial && !text.includes(' '))) {
+  if (!matches.length || (matches.length === 1 && matches[0][0] === partial)) {
     if (hint) hint.style.display = 'none';
     _slashHintIndex = -1;
     _slashHintMatches = [];
@@ -2475,7 +2476,7 @@ function _updateSlashHint(text) {
 function _renderSlashHintItems(hint) {
   hint.innerHTML = _slashHintMatches.map(([k, v], i) =>
     `<div class="slash-hint-item${i === _slashHintIndex ? ' active' : ''}" onmousedown="event.preventDefault();_selectSlashHint(${i});" onmouseenter="_slashHintIndex=${i};_renderSlashHintItems($('slashHint'));">
-      <span class="slash-cmd">${esc(k)}</span>${v.args ? `<span class="slash-args">${esc(v.args)}</span>` : ''}
+      <span class="slash-cmd">${esc(k)}</span>${v.skill?'<span class="slash-skill-badge">skill</span>':''}${v.args ? `<span class="slash-args">${esc(v.args)}</span>` : ''}
       <span class="slash-desc">${esc(v.desc)}</span></div>`
   ).join('');
 }
@@ -2584,7 +2585,7 @@ function showHelp(){
 }
 
 // ── Slash Commands ──
-const _slashCommands={
+const _builtinSlashCommands={
   '/help':{desc:'Show available commands',args:''},
   '/status':{desc:'Show all agent statuses',args:''},
   '/tasks':{desc:'Show all tasks',args:''},
@@ -2603,6 +2604,16 @@ const _slashCommands={
   '/remove-dir':{desc:'Remove added directory',args:'<path>'},
   '/dirs':{desc:'Show added directories',args:''},
 };
+let _slashCommands={..._builtinSlashCommands};
+function _syncSkillCommands(skills){
+  _slashCommands={..._builtinSlashCommands};
+  (skills||[]).forEach(s=>{
+    const key='/'+s.name;
+    if(!_slashCommands[key]){
+      _slashCommands[key]={desc:s.description||'Skill',args:s.args||'',skill:true};
+    }
+  });
+}
 
 async function _addDir(path){
   try{
@@ -2673,8 +2684,29 @@ function _handleSlashCommand(text){
     case '/budget':
       if(!args){toast('Usage: /budget <amount>','warn');break;}
       fetch(HUB+'/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:parseFloat(args)})}).then(()=>toast(`Budget set: $${args}`,'success')).catch(()=>toast('Failed','error'));break;
-    default:
-      toast('Unknown command: '+cmd,'warn');
+    default:{
+      // Check if it's a skill command → send as task (worker resolves SKILL.md)
+      const skillInfo=_slashCommands[cmd];
+      if(skillInfo&&skillInfo.skill){
+        const target=sel||'architect';
+        const skillText=text;// e.g. "/breakdown_pvd https://..."
+        // Create task + send message (same flow as normal tasks)
+        (async()=>{
+          try{
+            const taskPayload={description:skillText,assigned_to:target,status:'created',priority:5,created_by:'user'};
+            const taskResult=await(await fetch(HUB+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(taskPayload)})).json();
+            const taskId=taskResult?.id;
+            const msgPayload={sender:'user',receiver:target,content:skillText,msg_type:'task'};
+            if(taskId)msgPayload.task_id=String(taskId);
+            await fetch(HUB+'/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(msgPayload)});
+            toast(`Skill ${cmd} → ${target}${taskId?' (#'+taskId+')':''}`,  'success', 3000);
+          }catch(e){toast('Failed to send skill: '+e,'error');}
+        })();
+      } else {
+        toast('Unknown command: '+cmd,'warn');
+      }
+      break;
+    }
   }
 }
 

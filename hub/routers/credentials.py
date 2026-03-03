@@ -179,7 +179,7 @@ def get_oauth_pending():
 
 @router.post("/services/{svc_id}/oauth")
 def trigger_oauth(svc_id: str):
-    """Clear OAuth cache for a service and return CLI command for manual auth."""
+    """Clear OAuth cache and trigger browser-based OAuth flow for an MCP service."""
     svc = next((s for s in SERVICE_REGISTRY if s["id"] == svc_id), None)
     if not svc:
         return {"status": "error", "message": "Unknown service"}
@@ -198,15 +198,24 @@ def trigger_oauth(svc_id: str):
                 cleared = True
         except (OSError, json.JSONDecodeError):
             pass
-    # Remove + re-add MCP to trigger OAuth on next use
+    # Remove existing MCP entry (silent)
     mcp_cmd = svc.get("mcp_cmd", "")
     try:
         subprocess.run(["claude", "mcp", "remove", "--scope", "user", mcp_name],
                        capture_output=True, timeout=10)
-        if mcp_cmd:
-            subprocess.run(mcp_cmd, shell=True, capture_output=True, timeout=30)
     except Exception:
         pass
+    # Re-add MCP in background thread — this opens the browser for OAuth
+    def _run_oauth():
+        try:
+            if mcp_cmd:
+                # Run with stdout/stderr visible so browser OAuth can trigger
+                subprocess.run(mcp_cmd, shell=True, timeout=120)
+            add_activity("system", "system", "mcp_auth", f"OAuth flow started for {mcp_name}")
+        except Exception as e:
+            logger.warning(f"OAuth flow error for {mcp_name}: {e}")
+    import threading
+    threading.Thread(target=_run_oauth, daemon=True).start()
     # Clear from pending_oauth state
     with lock:
         import hub.state as _st
@@ -215,7 +224,7 @@ def trigger_oauth(svc_id: str):
     return {
         "status": "ok",
         "cleared": cleared,
-        "message": f"Cache cleared for {mcp_name}. Run this command in your terminal to complete OAuth:",
+        "message": f"OAuth flow started for {mcp_name} — check your browser for authentication.",
         "command": mcp_cmd,
     }
 

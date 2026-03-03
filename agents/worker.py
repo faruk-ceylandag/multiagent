@@ -358,6 +358,60 @@ def _hot_reload_multiagent_config(ctx):
         log(ctx, f"🔄 Config reloaded: {', '.join(changed)}")
 
 
+def _resolve_skill(ctx, message_text):
+    """Detect /skill_name invocations and expand them with SKILL.md content.
+
+    Claude CLI only processes skills in interactive mode. Since agents run in
+    non-interactive mode (-p prompt), we need to resolve skills here and inject
+    the SKILL.md instructions directly into the prompt.
+
+    Returns (expanded_text, skill_name) if a skill was found, else (message_text, None).
+    """
+    if not message_text or not message_text.strip().startswith("/"):
+        return message_text, None
+
+    # Extract skill name and arguments: /skill_name arg1 arg2 ...
+    parts = message_text.strip().split(None, 1)
+    skill_name = parts[0].lstrip("/")
+    arguments = parts[1] if len(parts) > 1 else ""
+
+    # Search for SKILL.md in agent's .claude/skills/ and shared ecosystem
+    skill_dirs = [
+        os.path.join(ctx.AGENT_CWD, ".claude", "skills", skill_name),
+        os.path.join(ctx.MA_DIR, ".claude", "skills", skill_name),
+        os.path.join(ctx.MA_DIR, "ecosystem", "skills", skill_name),
+    ]
+
+    skill_md = None
+    for d in skill_dirs:
+        candidate = os.path.join(d, "SKILL.md")
+        if os.path.exists(candidate):
+            try:
+                with open(candidate) as f:
+                    skill_md = f.read()
+                break
+            except OSError:
+                continue
+
+    if not skill_md:
+        return message_text, None
+
+    # Strip YAML frontmatter (between --- markers)
+    if skill_md.startswith("---"):
+        end = skill_md.find("---", 3)
+        if end != -1:
+            skill_md = skill_md[end + 3:].strip()
+
+    # Replace placeholders
+    skill_md = skill_md.replace("$ARGUMENTS", arguments)
+    skill_md = skill_md.replace("$WORKSPACE", ctx.WORKSPACE)
+    skill_md = skill_md.replace("$AGENT_NAME", ctx.AGENT_NAME)
+    skill_md = skill_md.replace("$HUB", ctx.HUB_URL)
+
+    log(ctx, f"📋 Skill resolved: /{skill_name} ({len(skill_md)} chars)")
+    return skill_md, skill_name
+
+
 def _refresh_ecosystem(ctx):
     """Runtime tool discovery: sync new subagents/commands/skills from ecosystem dir."""
     try:
@@ -1310,6 +1364,16 @@ while True:
 
         # Pre-flight: detect needed MCPs from task content
         task_text = " ".join(m.get("content", "") for m in msgs)
+
+        # Skill resolution: expand /skill_name invocations with SKILL.md content
+        _resolved_text, _skill_name = _resolve_skill(ctx, task_text)
+        if _skill_name:
+            # Replace message content with resolved skill instructions
+            task_text = _resolved_text
+            # Update msgs so the template gets the expanded content
+            msgs = [{"sender": msgs[0].get("sender", "user") if msgs else "user",
+                      "content": _resolved_text, "msg_type": "task"}]
+
         _needed_mcps = _detect_needed_mcps(task_text)
 
         # Pre-flight credential check — architect skips (delegates to agents who will check)

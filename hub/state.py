@@ -941,6 +941,52 @@ creds_file = os.path.join(MA_DIR, "credentials.env") if MA_DIR else ""
 # ── Cached Dashboard Snapshot ──
 _snapshot_cache = {"data": None, "version": -1}
 
+def _discover_skills():
+    """Scan .claude/skills/ for SKILL.md files, parse frontmatter."""
+    skills_dir = os.path.join(MA_DIR, ".claude", "skills") if MA_DIR else ""
+    if not skills_dir or not os.path.isdir(skills_dir):
+        return []
+    result = []
+    for name in sorted(os.listdir(skills_dir)):
+        skill_md = os.path.join(skills_dir, name, "SKILL.md")
+        if not os.path.isfile(skill_md):
+            continue
+        try:
+            with open(skill_md, "r") as f:
+                content = f.read(2000)
+            # Parse YAML frontmatter between --- lines
+            if content.startswith("---"):
+                end = content.find("---", 3)
+                if end > 0:
+                    fm = content[3:end]
+                    skill = {"name": name, "description": "", "args": ""}
+                    for line in fm.strip().split("\n"):
+                        if ":" in line:
+                            k, v = line.split(":", 1)
+                            k, v = k.strip(), v.strip().strip('"').strip("'")
+                            if k == "name":
+                                skill["name"] = v
+                            elif k == "description":
+                                skill["description"] = v
+                            elif k == "argument-hint":
+                                skill["args"] = v
+                    result.append(skill)
+        except Exception:
+            pass
+    return result
+
+_skills_cache = {"data": None, "mtime": 0}
+
+def _get_skills_cached():
+    """Return skills list, cached with 60s TTL."""
+    now = time.time()
+    if _skills_cache["data"] is not None and now - _skills_cache["mtime"] < 60:
+        return _skills_cache["data"]
+    _skills_cache["data"] = _discover_skills()
+    _skills_cache["mtime"] = now
+    return _skills_cache["data"]
+
+
 def get_dashboard_snapshot():
     """Get cached dashboard snapshot. Rebuilds only when state version changes.
     No lock needed — GIL ensures atomic reads, and dashboard display tolerates
@@ -1061,6 +1107,7 @@ def _build_dashboard_data():
         "task_comments": dict(task_comments),
         "task_reviews": dict(task_reviews),
         "workspaces": dict(workspace_registry),
+        "skills": _get_skills_cached(),
         "analytics": {
             "by_agent": by_agent, "durations": durations,
             "total_tasks": len(tasks_snap_dict),

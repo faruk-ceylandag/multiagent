@@ -1,0 +1,1 @@
+/Users/faruk.ceylandag/.local/share/multiagent/ecosystem/commands/submit-review.md

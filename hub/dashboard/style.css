@@ -409,9 +409,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 #slashHint { display:none; background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:4px; margin:0 12px; max-height:240px; overflow-y:auto; box-shadow:0 -4px 16px rgba(0,0,0,0.2); }
 .slash-hint-item { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:4px; cursor:pointer; font-size:11px; transition:background .1s; }
 .slash-hint-item:hover, .slash-hint-item.active { background:var(--bg3); }
-.slash-cmd { color:var(--ac); font-weight:600; font-family:'SF Mono',Consolas,monospace; min-width:80px; }
-.slash-args { color:var(--fg3); font-family:'SF Mono',Consolas,monospace; font-size:10px; }
-.slash-desc { color:var(--fg2); flex:1; text-align:right; font-size:10px; }
+.slash-cmd { color:var(--ac); font-weight:600; font-family:'SF Mono',Consolas,monospace; min-width:100px; white-space:nowrap; }
+.slash-args { color:var(--fg3); font-family:'SF Mono',Consolas,monospace; font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:180px; }
+.slash-desc { color:var(--fg2); flex:1; text-align:right; font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.slash-skill-badge { font-size:8px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; padding:1px 5px; border-radius:3px; background:rgba(139,92,246,0.15); color:var(--ac); flex-shrink:0; }
 
 /* Chat enhancements */
 .chat-empty { display:flex; flex-direction:column; align-items:center; padding:30px 20px; }

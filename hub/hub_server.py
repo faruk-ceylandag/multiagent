@@ -75,8 +75,11 @@ async def on_shutdown():
 
 # ── Dashboard static files ──
 _script_dir = os.path.dirname(os.path.abspath(__file__))
+# Prefer source dashboard (WORKSPACE/hub/dashboard) over runtime copies for live-reload during dev
+_workspace = os.environ.get("WORKSPACE", "")
 _dashboard_dir = None
-for d in [os.path.join(_script_dir, "dashboard"),
+for d in [os.path.join(_workspace, "hub", "dashboard") if _workspace else "",
+          os.path.join(_script_dir, "dashboard"),
           os.path.join(MA_DIR, "dashboard") if MA_DIR else ""]:
     if d and os.path.isdir(d) and os.path.exists(os.path.join(d, "index.html")):
         _dashboard_dir = d
