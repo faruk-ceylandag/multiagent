@@ -1646,8 +1646,9 @@ function renderInbox(p){
           }).join('');
           const doneLabel=planStatus==='approved'?`<span style="font-size:11px;font-weight:600;color:var(--green)">Approved</span>`
             :planStatus==='dismissed'?`<span style="font-size:11px;font-weight:600;color:var(--fg3)">Dismissed</span>`:'';
+          const selfExec=planState&&planState.self_execute;
           return`<div class="chat-bubble chat-bubble-agent plan-proposal-bubble"${isDone?' style="opacity:0.6"':''}>
-            <div class="plan-header"><span class="plan-badge">Plan</span><span class="plan-title">${miniMarkdown(displayContent)}</span></div>
+            <div class="plan-header"><span class="plan-badge">Plan</span>${selfExec?'<span class="plan-badge" style="background:var(--ac);color:#fff;margin-left:4px">Direct</span>':''}<span class="plan-title">${miniMarkdown(displayContent)}</span></div>
             ${formHtml}
             ${steps.length?`<div class="plan-steps">
               ${isDone?'':`<div class="plan-toolbar"><label class="plan-select-all"><input type="checkbox" checked onchange="toggleAllPlanSteps(this,${planId})"> Select all (${steps.length} steps)</label></div>`}

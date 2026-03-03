@@ -81,6 +81,7 @@ def send_message(msg: Message):
                 "summary": msg.content[:500],
                 "task_id": entry.get("task_id", ""),
                 "form_fields": entry.get("form_fields", []),
+                "self_execute": entry.get("self_execute", False),
             }
             entry["plan_id"] = plan_id
             # Route to user inbox (always, so user sees what happened)

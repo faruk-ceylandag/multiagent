@@ -1328,6 +1328,13 @@ while True:
         # Architects get full roster (roles/expertise/status) for routing decisions
         # Dev agents get minimal roster (just names) — they rarely need team details
         _is_architect = ctx.AGENT_NAME == "architect"
+        _is_self_execute = False
+        if _is_architect and ctx.current_task_id:
+            try:
+                _se_task = hub_get(ctx, f"/tasks/{ctx.current_task_id}")
+                _is_self_execute = bool(_se_task and isinstance(_se_task, dict) and _se_task.get("_self_execute"))
+            except Exception:
+                pass
         if _is_architect:
             roster = get_agent_roster(ctx)
         else:
@@ -1379,7 +1386,7 @@ while True:
         _needed_mcps = _detect_needed_mcps(task_text)
 
         # Pre-flight credential check — architect skips (delegates to agents who will check)
-        missing_creds = check_missing_credentials(task_text, saved_creds) if not _is_architect else []
+        missing_creds = check_missing_credentials(task_text, saved_creds) if (not _is_architect or _is_self_execute) else []
         if missing_creds:
             missing_list = ", ".join(f"{s['service']} ({', '.join(s['keys'])})" for s in missing_creds)
             # Include service_id for targeted wizard opening on dashboard
@@ -1678,8 +1685,27 @@ Do NOT scan the entire workspace. Do NOT guess the project from the URL domain."
         role = read_file(ctx.ROLE_FILE)
         role_ctx = f"\nROLE: {role.strip()}" if role and role.strip() else ""
 
+        # ── Self-execute: architect executes all steps directly ──
+        if _is_self_execute:
+            task_tpl = load_template(ctx, "task_self_execute", """You are {{agent}} — executing a consolidated plan directly.{{role_ctx}}
+{{project_ctx}}
+{{prefetched}}
+{{contracts}}
+
+=== TASK ===
+{{messages}}
+
+RULES:
+1. Execute ALL steps yourself, in order. Do NOT delegate to other agents.
+2. Do NOT create a plan_proposal. Do NOT use curl to post plans.
+3. Use MCP tools (Atlassian, Google, Figma, etc.) as instructed in each step.
+4. After completing each step, report progress to user via:
+   curl -s -X POST {{hub}}/messages -H 'Content-Type: application/json' -d '{"sender":"{{agent}}","receiver":"user","content":"<status message>","msg_type":"info"}'
+5. If a step fails, report the error and continue with the next step.
+6. NEVER ask questions. NEVER ask for confirmation. Execute and report.
+{{branch_info}}{{hints}}""")
         # ── Architect gets a lean, fast-delegation prompt ──
-        if ctx.AGENT_NAME == "architect" and not _is_skill:
+        elif ctx.AGENT_NAME == "architect" and not _is_skill:
             task_tpl = load_template(ctx, "task_architect", """You are {{agent}} — the team coordinator.{{role_ctx}}
 === TASK ===
 {{messages}}
